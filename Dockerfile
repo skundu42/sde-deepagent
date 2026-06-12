@@ -12,6 +12,7 @@ RUN uv sync --frozen --no-dev --no-install-project
 
 COPY src ./src
 COPY ui ./ui
+COPY LICENSE README.md ./
 RUN uv sync --frozen --no-dev
 
 # config/, context/ and data/ are expected as volumes (see docker-compose.yml)
