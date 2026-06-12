@@ -62,6 +62,14 @@ class RepoCreate(BaseModel):
     setup: str | None = None
     test: str | None = None
     context: list[str] = []
+    sandbox: bool | None = None
+    sandbox_image: str | None = None
+    sandbox_network: str | None = Field(default=None, pattern=r"^(none|bridge)$")
+    approval: str | None = Field(default=None, pattern=r"^(auto|required)$")
+
+
+class SteerMessage(BaseModel):
+    message: str = Field(min_length=1, max_length=4000)
 
 
 # ---- app ----
@@ -90,6 +98,12 @@ async def lifespan(app: FastAPI):
     for intake in intakes:
         intake.start()
         worker.add_notifier(intake.notify)
+
+    review_intake = None
+    if settings.github_review_polling and settings.github_token:
+        from .intake.github_reviews import GithubReviewIntake
+        review_intake = GithubReviewIntake(settings, db)
+        review_intake.start()
     worker.start()
 
     app.state.settings = settings
@@ -101,19 +115,27 @@ async def lifespan(app: FastAPI):
     app.state.memory = memory_from_settings(settings)
     app.state.linear = linear
     app.state.intakes = intakes
-    logger.info("sde-deepagent up: %d intake channel(s), max %d concurrent tasks",
-                len(intakes), settings.max_concurrent_tasks)
+    logger.info("sde-deepagent up: %d intake channel(s), max %d concurrent tasks%s",
+                len(intakes), settings.max_concurrent_tasks,
+                ", auth on" if settings.auth_token else "")
     try:
         yield
     finally:
         await worker.stop()
         for intake in intakes:
             await intake.stop()
+        if review_intake:
+            await review_intake.stop()
         await db.close()
 
 
 def create_app() -> FastAPI:
     app = FastAPI(title="sde-deepagent", version=__version__, lifespan=lifespan)
+
+    settings = get_settings()
+    if settings.auth_token:
+        from .auth import AuthMiddleware
+        app.add_middleware(AuthMiddleware, token=settings.auth_token)
 
     # ---- health & stats ----
 
@@ -132,6 +154,9 @@ def create_app() -> FastAPI:
             "memory": bool(s.supermemory_base_url and s.supermemory_api_key),
             "firecrawl": bool(s.firecrawl_url),
             "require_approval": s.require_approval,
+            "auth": bool(s.auth_token),
+            "sandbox_default": s.sandbox_default,
+            "review_polling": s.github_review_polling and bool(s.github_token),
             "intakes": [type(i).__name__.replace("Intake", "").lower()
                         for i in request.app.state.intakes],
             "running": len(request.app.state.worker.running),
@@ -200,6 +225,18 @@ def create_app() -> FastAPI:
             if request.app.state.worker.cancel_task(task_id):
                 return {"status": "cancelling"}
         raise HTTPException(409, f"task is {task.status}, cannot cancel")
+
+    @app.post("/api/tasks/{task_id}/steer")
+    async def steer_task(request: Request, task_id: str, body: SteerMessage):
+        """Send a mid-task instruction to a running task; the agent receives it
+        the next time it checks for messages."""
+        runner = request.app.state.worker.runner
+        if not runner.steer(task_id, body.message):
+            raise HTTPException(409, "task is not running — steering only applies "
+                                     "to in-flight tasks")
+        await request.app.state.db.add_event(task_id, "log",
+                                             {"text": f"operator steer: {body.message}"})
+        return {"queued": True}
 
     async def _ship_approved(request: Request, task) -> str | None:
         """Push the held branch and open the PR (degrading to branch-only like
@@ -452,7 +489,9 @@ def create_app() -> FastAPI:
     async def upsert_repo(request: Request, body: RepoCreate):
         repo = RepoConfig(name=body.name, url=body.url, default_branch=body.default_branch,
                           description=body.description, setup=body.setup, test=body.test,
-                          context=body.context)
+                          context=body.context, sandbox=body.sandbox,
+                          sandbox_image=body.sandbox_image,
+                          sandbox_network=body.sandbox_network, approval=body.approval)
         request.app.state.cfg.upsert_repo(repo)
         return repo.to_dict() | {"name": repo.name}
 

@@ -88,6 +88,11 @@ class RepoConfig:
     setup: str | None = None
     test: str | None = None
     context: list[str] = field(default_factory=list)
+    # per-repo overrides (None = inherit the server-wide default)
+    sandbox: bool | None = None          # run this repo's tasks in a container
+    sandbox_image: str | None = None     # image for the sandbox (else server default)
+    sandbox_network: str | None = None   # none | bridge (egress policy in the sandbox)
+    approval: str | None = None          # auto | required (else server require_approval)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -97,6 +102,10 @@ class RepoConfig:
             "setup": self.setup,
             "test": self.test,
             "context": self.context,
+            "sandbox": self.sandbox,
+            "sandbox_image": self.sandbox_image,
+            "sandbox_network": self.sandbox_network,
+            "approval": self.approval,
         }
 
 
@@ -189,6 +198,10 @@ class ConfigStore:
                 setup=spec.get("setup"),
                 test=spec.get("test"),
                 context=spec.get("context") or [],
+                sandbox=spec.get("sandbox"),
+                sandbox_image=spec.get("sandbox_image"),
+                sandbox_network=spec.get("sandbox_network"),
+                approval=spec.get("approval"),
             )
         return out
 

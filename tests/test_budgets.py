@@ -11,7 +11,6 @@ from sde_deepagent.db import Database
 from sde_deepagent.pricing import BudgetExceeded, CostTracker
 from sde_deepagent.worker import Worker, _utc_midnight_ts
 
-
 # ---- runner-level per-task budget check ----
 
 class _Emits:

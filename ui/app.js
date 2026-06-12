@@ -6,11 +6,32 @@ const KNOWN_AGENTS = ["orchestrator", "explorer", "coder", "tester", "reviewer"]
 
 /* ---------- api ---------- */
 
-async function api(path, opts = {}) {
+let AUTH = sessionStorage.getItem("auth_token") || "";
+
+function authHeaders(extra = {}) {
+  return AUTH ? { ...extra, Authorization: `Bearer ${AUTH}` } : extra;
+}
+
+/* Append the token to SSE URLs — EventSource can't set headers. */
+function withToken(url) {
+  if (!AUTH) return url;
+  return url + (url.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(AUTH);
+}
+
+function promptForToken() {
+  const t = window.prompt("API token (auth is enabled on this server):");
+  if (t) { AUTH = t.trim(); sessionStorage.setItem("auth_token", AUTH); }
+  return !!t;
+}
+
+async function api(path, opts = {}, _retried = false) {
   const res = await fetch(path, {
-    headers: { "Content-Type": "application/json" },
     ...opts,
+    headers: authHeaders({ "Content-Type": "application/json", ...(opts.headers || {}) }),
   });
+  if (res.status === 401 && !_retried && promptForToken()) {
+    return api(path, opts, true);
+  }
   if (!res.ok) {
     let detail = res.statusText;
     try { detail = (await res.json()).detail || detail; } catch {}
@@ -73,7 +94,7 @@ function modelOptions(catalog, selected, emptyLabel) {
 
 let globalES = null;
 function connectGlobal() {
-  globalES = new EventSource("/api/stream");
+  globalES = new EventSource(withToken("/api/stream"));
   globalES.onopen = () => $("#conn").classList.add("on");
   globalES.onerror = () => $("#conn").classList.remove("on");
   globalES.onmessage = (e) => {
@@ -253,6 +274,11 @@ async function renderTaskDetail(id) {
       <div class="todos-title">└─ plan</div>
       <div id="todo-list"></div>
     </div>
+    ${t.status === "running" ? `
+    <form class="steer-bar" id="steer-form">
+      <input id="steer-input" placeholder="Steer the running agent — e.g. 'also handle the empty-list case'" autocomplete="off">
+      <button class="btn sm" type="submit">⤳ send</button>
+    </form>` : ""}
     <div class="view-sub" style="margin-bottom:10px">agent trace ${t.status === "running" ? "· live" : ""}</div>
     <div class="timeline" id="timeline"></div>`;
 
@@ -260,6 +286,19 @@ async function renderTaskDetail(id) {
   if (cancelBtn) cancelBtn.onclick = async () => {
     try { await api(`/api/tasks/${id}/cancel`, { method: "POST" }); toast("cancel requested", "ok"); }
     catch (e) { toast(e.message, "err"); }
+  };
+
+  const steerForm = $("#steer-form");
+  if (steerForm) steerForm.onsubmit = async (e) => {
+    e.preventDefault();
+    const inp = $("#steer-input"), msg = inp.value.trim();
+    if (!msg) return;
+    inp.value = "";
+    try {
+      await api(`/api/tasks/${id}/steer`, { method: "POST",
+        body: JSON.stringify({ message: msg }) });
+      toast("steer sent — agent receives it at its next check", "ok");
+    } catch (e) { toast(e.message, "err"); }
   };
 
   const reviseBtn = $("#btn-revise");
@@ -351,7 +390,7 @@ async function renderTaskDetail(id) {
   catch (e) { toast(e.message, "err"); }
   timeline.lastElementChild?.scrollIntoView({ block: "nearest" });
 
-  taskES = new EventSource(`/api/tasks/${id}/stream?after=${lastId}`);
+  taskES = new EventSource(withToken(`/api/tasks/${id}/stream?after=${lastId}`));
   taskES.onmessage = (e) => append(JSON.parse(e.data), true);
 }
 
@@ -430,6 +469,11 @@ async function renderRepos() {
       ${r.setup ? `<div class="kv"><b>setup</b> ${esc(r.setup)}</div>` : ""}
       ${r.test ? `<div class="kv"><b>test</b> ${esc(r.test)}</div>` : ""}
       ${(r.context || []).length ? `<div class="kv"><b>docs</b> ${esc(r.context.join(", "))}</div>` : ""}
+      ${r.sandbox || r.approval ? `<div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">
+        ${r.sandbox ? `<span class="chip" style="color:var(--green);border-color:rgba(43,217,124,.4)">⊟ sandboxed${r.sandbox_network ? `:${esc(r.sandbox_network)}` : ""}</span>` : ""}
+        ${r.approval === "required" ? `<span class="chip" style="color:var(--violet);border-color:rgba(180,140,255,.4)">⏸ approval</span>` : ""}
+        ${r.approval === "auto" ? `<span class="chip">auto-ship</span>` : ""}
+      </div>` : ""}
     </div>`).join("");
   main.innerHTML = `
     <div class="view-head">
@@ -456,6 +500,32 @@ async function renderRepos() {
       </div>
       <div class="field"><label>Context docs <span style="text-transform:none">(comma-separated globs)</span></label>
         <input id="r-ctx" placeholder="docs/architecture.md, CONTRIBUTING.md"></div>
+      <div class="field-row">
+        <div class="field">
+          <label>Sandbox <span style="text-transform:none">(run tasks in a container)</span></label>
+          <select id="r-sandbox">
+            <option value="">server default</option>
+            <option value="true">on — isolate shell + egress</option>
+            <option value="false">off — run on host</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Sandbox network</label>
+          <select id="r-network">
+            <option value="">default (none)</option>
+            <option value="none">none — no egress</option>
+            <option value="bridge">bridge — allow egress</option>
+          </select>
+        </div>
+      </div>
+      <div class="field">
+        <label>Approval policy</label>
+        <select id="r-approval">
+          <option value="">server default</option>
+          <option value="auto">auto-ship (open PR directly)</option>
+          <option value="required">require human approval</option>
+        </select>
+      </div>
       <button class="btn" id="r-submit">＋ Save codebase</button>
     </div>`;
   document.querySelectorAll("[data-del]").forEach((b) => b.onclick = async () => {
@@ -474,6 +544,9 @@ async function renderRepos() {
           setup: $("#r-setup").value.trim() || null,
           test: $("#r-test").value.trim() || null,
           context: $("#r-ctx").value.split(",").map((s) => s.trim()).filter(Boolean),
+          sandbox: { "true": true, "false": false }[$("#r-sandbox").value] ?? null,
+          sandbox_network: $("#r-network").value || null,
+          approval: $("#r-approval").value || null,
         }),
       });
       toast("codebase saved", "ok");

@@ -267,13 +267,22 @@ GET/PUT /api/config/agents   POST /api/chat               DELETE /api/chat/{id}
 GET/POST/DELETE /api/resources                            POST /webhooks/linear
 ```
 
-## Security notes
+## Security
 
-- Agent shell commands run inside the task workspace with a **sanitized environment** — your API keys are never visible to the agent's shell, and git credentials are passed via process-scoped ephemeral config, never written to disk
-- The web UI/API have no built-in auth: bind to localhost and front with an authenticated reverse proxy (see Deployment)
-- Restrict Telegram with `TELEGRAM_ALLOWED_CHATS`; set `LINEAR_WEBHOOK_SECRET` if you expose the webhook
-- `REQUIRE_APPROVAL=true` guarantees nothing reaches your remotes without human sign-off
-- Run the Docker deployment for filesystem isolation of agent shell commands
+Defense in depth, each layer independently configurable:
+
+- **API auth** — set `AUTH_TOKEN` and every `/api/*` request and SSE stream requires a bearer token (header, or `?token=` for EventSource). Health and the HMAC-verified Linear webhook stay open; the UI prompts for the token and remembers it for the session. Still front production with TLS.
+- **Per-task container sandbox** — set a repo's `sandbox: true` (or `SANDBOX_DEFAULT=true`) and each task's shell runs in a disposable Docker container with the workspace bind-mounted and an **egress policy** (`sandbox_network: none` by default — no outbound — or `bridge`). Arbitrary build/test commands and untrusted repo code can't reach the host filesystem or the network. If a repo requests sandboxing but Docker is unavailable, the task **fails** rather than running on the host. (Mount `/var/run/docker.sock` into the devagent container for the compose deployment.)
+- **Prompt-injection resistance** — the orchestrator treats all repository content, documents, web pages, and memory entries as untrusted *data*, never instructions; operator guidance arrives only through the steering channel.
+- **Sanitized shell env** — API keys are never visible to the agent's shell; git credentials use process-scoped ephemeral config, never written to disk.
+- **Approval gate** — global `REQUIRE_APPROVAL=true` or per-repo `approval: required` holds work for human review before any push; `approval: auto` lets trusted repos flow.
+- Restrict Telegram with `TELEGRAM_ALLOWED_CHATS`; set `LINEAR_WEBHOOK_SECRET` if you expose that webhook.
+
+## Human-in-the-loop & the review loop
+
+- **Mid-task steering** — send an instruction to a running task (UI steer bar or `POST /api/tasks/{id}/steer`); the agent picks it up at its next checkpoint (always before opening the PR).
+- **Manual revisions** — **revise** a completed task to continue on the same branch with your feedback; the existing PR updates in place.
+- **Automatic review loop** — `GITHUB_REVIEW_POLLING=true` watches the PRs devagent opened for new human review comments and auto-queues a revision to address them.
 
 ## Development
 

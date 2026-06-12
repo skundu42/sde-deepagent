@@ -1,7 +1,10 @@
 import pytest
 
 from sde_deepagent.pricing import (
-    BudgetExceeded, CostTracker, lookup_price, normalize_model_name,
+    BudgetExceeded,
+    CostTracker,
+    lookup_price,
+    normalize_model_name,
 )
 
 

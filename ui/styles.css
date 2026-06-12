@@ -166,6 +166,13 @@ a:hover { text-decoration: underline; }
 .approval-actions { display: flex; gap: 10px; margin-top: 12px; }
 @keyframes pulse { 50% { opacity: .55; } }
 
+.steer-bar { display: flex; gap: 8px; margin-bottom: 16px; }
+.steer-bar input {
+  flex: 1; background: #050807; color: var(--ink); border: 1px solid var(--line-bright);
+  font: 12px var(--mono); padding: 8px 12px; outline: none; border-radius: 0;
+}
+.steer-bar input:focus { border-color: var(--amber); box-shadow: 0 0 0 1px var(--amber); }
+
 .empty {
   border: 1px dashed var(--line-bright); padding: 42px; text-align: center;
   color: var(--ink-faint);

@@ -27,6 +27,7 @@ sde-deepagent = "sde_deepagent.main:main"
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.25",
+    "ruff>=0.15.17",
 ]
 
 [build-system]
@@ -39,3 +40,11 @@ packages = ["src/sde_deepagent"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501", "E402"]

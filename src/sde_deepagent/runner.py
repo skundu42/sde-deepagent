@@ -13,8 +13,15 @@ from .bus import EventBus
 from .config import ConfigStore, RepoConfig
 from .db import Database, Task
 from .gitops import (
-    GitError, commit_all, commits_ahead, create_pull_request, diff_stat,
-    has_changes, prepare_workspace, prune_workspaces, push_branch,
+    GitError,
+    commit_all,
+    commits_ahead,
+    create_pull_request,
+    diff_stat,
+    has_changes,
+    prepare_workspace,
+    prune_workspaces,
+    push_branch,
 )
 from .llm import build_model
 from .memory import memory_from_settings, repo_tag
@@ -30,6 +37,7 @@ TRUNCATE_RESULT = 2500
 
 class TaskRunner:
     def __init__(self, db: Database, bus: EventBus, cfg: ConfigStore, settings: Settings):
+        self.mailboxes: dict[str, list[str]] = {}  # task_id -> pending operator messages
         self.db = db
         self.bus = bus
         self.cfg = cfg
@@ -282,6 +290,30 @@ class TaskRunner:
         waiting = await self.db.list_tasks(status="awaiting_approval", limit=500)
         return {t.id for t in waiting}
 
+    def steer(self, task_id: str, message: str) -> bool:
+        """Queue an operator message for a running task; delivered when the
+        agent next calls check_messages. Returns False if the task isn't running."""
+        if task_id not in self.mailboxes:
+            return False
+        self.mailboxes[task_id].append(message)
+        return True
+
+    def _drain_mailbox(self, task_id: str) -> list[str]:
+        msgs = self.mailboxes.get(task_id, [])
+        self.mailboxes[task_id] = []
+        return msgs
+
+    def _resolve_approval(self, repo) -> bool:
+        """Per-repo approval policy overrides the server-wide default."""
+        if repo.approval == "required":
+            return True
+        if repo.approval == "auto":
+            return False
+        return self.settings.require_approval
+
+    def _resolve_sandbox(self, repo) -> bool:
+        return repo.sandbox if repo.sandbox is not None else self.settings.sandbox_default
+
     # ---- entry point ----
 
     async def run(self, task: Task) -> Task:
@@ -290,6 +322,8 @@ class TaskRunner:
         await self.emit(task.id, "status", {"status": "running"})
         built = None
         tracker: CostTracker | None = None
+        sandboxed = False
+        self.mailboxes[task.id] = []
         try:
             parent: Task | None = None
             if task.parent_id:
@@ -312,10 +346,34 @@ class TaskRunner:
                             {"text": f"workspace ready on branch {ws.branch}"
                                      + (f" (revising task {parent.id})" if parent else "")})
 
+            # per-task container sandbox (isolates the agent's shell + egress)
+            sandbox_container: str | None = None
+            if self._resolve_sandbox(repo):
+                from . import sandbox as sbx
+                if not sbx.docker_available():
+                    raise GitError(
+                        "repo requests sandboxing but Docker is unavailable — refusing "
+                        "to run untrusted commands on the host. Install/start Docker or "
+                        "set sandbox: false for this repo.")
+                image = repo.sandbox_image or self.settings.sandbox_image
+                network = repo.sandbox_network or self.settings.sandbox_network
+                sandbox_container = sbx.start_container(
+                    task.id, str(ws.path), image=image, network=network,
+                    memory=self.settings.sandbox_memory, cpus=self.settings.sandbox_cpus)
+                sandboxed = True
+                await self.emit(task.id, "log", {
+                    "text": f"sandbox container started (image={image}, network={network})"})
+
             if repo.setup:
                 await self.emit(task.id, "log", {"text": f"running setup: {repo.setup}"})
-                from .gitops import run_cmd
-                code, out = await run_cmd(["bash", "-lc", repo.setup], cwd=ws.path, timeout=900)
+                if sandbox_container:
+                    from .sandbox import exec_in_container
+                    res = exec_in_container(sandbox_container, repo.setup, timeout=900)
+                    code, out = res.exit_code, res.output
+                else:
+                    from .gitops import run_cmd
+                    code, out = await run_cmd(["bash", "-lc", repo.setup], cwd=ws.path,
+                                              timeout=900)
                 await self.emit(task.id, "tool_result",
                                 {"name": "setup", "output": out[-2000:], "exit_code": code})
                 if code != 0:
@@ -340,25 +398,28 @@ class TaskRunner:
                 )
             else:
                 task_description = f"{task.title}\n\n{task.description}"
-            built = await build_agent(ws, task_description,
-                                      agents_cfg, self.settings,
-                                      model_override=task.model, on_event=on_tool_event)
+            built = await build_agent(
+                ws, task_description, agents_cfg, self.settings,
+                model_override=task.model, on_event=on_tool_event,
+                sandbox_container=sandbox_container,
+                drain_messages=lambda: self._drain_mailbox(task.id))
             await self.emit(task.id, "log", {
                 "text": f"agent started (orchestrator={task.model or agents_cfg.orchestrator_model}, "
                         f"subagents={', '.join(s.name for s in agents_cfg.subagents)}"
-                        + (f", budget=${budget:.2f}" if budget else "") + ")"})
+                        + (f", budget=${budget:.2f}" if budget else "")
+                        + (", sandboxed" if sandboxed else "") + ")"})
 
             final_text = await asyncio.wait_for(
                 self._consume_stream(task, built, tracker, budget),
                 timeout=self.settings.task_timeout_seconds,
             )
 
-            if self.settings.require_approval:
+            require_approval = self._resolve_approval(repo)
+            if require_approval:
                 await self._persist_usage(task, tracker)
                 if await self._request_approval(task, built, final_text):
                     return task  # held for a human; approve/reject endpoint finishes it
-            pr_url = None if self.settings.require_approval \
-                else await self._finalize(task, built)
+            pr_url = None if require_approval else await self._finalize(task, built)
             if pr_url:
                 await self.db.update_task(task.id, pr_url=pr_url)
                 task.pr_url = pr_url
@@ -401,6 +462,13 @@ class TaskRunner:
                                       finished_at=time.time())
             await self.emit(task.id, "status", {"status": "failed", "error": task.error[:1000]})
         finally:
+            self.mailboxes.pop(task.id, None)
+            if sandboxed:
+                try:
+                    from . import sandbox as sbx
+                    sbx.stop_container(task.id)
+                except Exception:  # noqa: BLE001
+                    logger.exception("failed to stop sandbox for %s", task.id)
             try:
                 deleted = prune_workspaces(self.settings,
                                            protect=await self._protected_workspaces())

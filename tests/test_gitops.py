@@ -5,8 +5,15 @@ import pytest
 
 from sde_deepagent.config import RepoConfig
 from sde_deepagent.gitops import (
-    auth_env, branch_name_for, commit_all, commits_ahead, has_changes,
-    parse_remote, prepare_workspace, prune_workspaces, run_cmd,
+    auth_env,
+    branch_name_for,
+    commit_all,
+    commits_ahead,
+    has_changes,
+    parse_remote,
+    prepare_workspace,
+    prune_workspaces,
+    run_cmd,
 )
 from sde_deepagent.settings import get_settings
 
@@ -57,7 +64,8 @@ async def test_clone_persists_no_token(temp_env, tmp_path, monkeypatch):
 def test_prune_workspaces(temp_env):
     settings = get_settings()
     root = settings.workspaces_dir
-    import os, time
+    import os
+    import time
     for i in range(5):
         d = root / f"task{i}"
         d.mkdir(parents=True)

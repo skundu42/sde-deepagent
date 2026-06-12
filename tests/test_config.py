@@ -1,7 +1,7 @@
+import pytest
+
 from sde_deepagent.config import ConfigStore, RepoConfig
 from sde_deepagent.llm import normalize_model_id
-
-import pytest
 
 
 def test_defaults_created(tmp_path):

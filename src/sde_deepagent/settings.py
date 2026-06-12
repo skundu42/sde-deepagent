@@ -52,9 +52,14 @@ class Settings(BaseSettings):
     linear_poll_seconds: int = 30
     linear_webhook_secret: str | None = None
 
+    # --- github PR review → auto-revision (optional) ---
+    github_review_polling: bool = False
+    github_review_poll_seconds: int = 120
+
     # --- server / runtime ---
     host: str = "0.0.0.0"
     port: int = 8321
+    auth_token: str | None = None  # if set, API + SSE require this bearer token
     data_dir: Path = Path("data")
     config_dir: Path = Path("config")
     context_dir: Path = Path("context")
@@ -63,8 +68,15 @@ class Settings(BaseSettings):
     task_timeout_seconds: int = 3600
     recursion_limit: int = 1000
     auto_finalize: bool = True  # if agent leaves uncommitted work, commit/push/PR it
-    require_approval: bool = False  # hold work for human approval before push/PR
+    require_approval: bool = False  # global default: hold work for approval before push/PR
     workspace_retention: int = 10  # keep N most recent task workspaces on disk
+
+    # --- sandboxing (per-task container isolation) ---
+    sandbox_default: bool = False     # default for repos that don't set `sandbox`
+    sandbox_image: str = "python:3.12-slim"
+    sandbox_network: str = "none"     # none | bridge — egress policy inside the sandbox
+    sandbox_memory: str = "2g"
+    sandbox_cpus: str = "2"
 
     # --- LLM cost budgets (USD; 0 = unlimited) ---
     task_budget_usd: float = 0.0   # default per-task cap (overridable per task)

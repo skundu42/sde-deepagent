@@ -1,7 +1,6 @@
 """The five capability upgrades: junk-file guard, PR revision, approval gate,
 reasoning effort, repo map."""
 
-import asyncio
 from types import SimpleNamespace
 
 import httpx

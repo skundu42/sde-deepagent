@@ -12,16 +12,23 @@ from deepagents.backends import LocalShellBackend
 from langchain_core.tools import tool
 
 from .config import AgentsConfig
-from .context import build_context_block
+from .context import build_context_block, build_repo_map
 from .gitops import (
-    GitError, Workspace, commit_all, create_pull_request, has_changes, push_branch,
+    GitError,
+    Workspace,
+    commit_all,
+    create_pull_request,
+    has_changes,
+    push_branch,
 )
-from .context import build_repo_map
 from .llm import EFFORT_LEVELS, build_model, normalize_model_id
 from .mcp_tools import load_mcp_tools
 from .memory import GLOBAL_TAG, Memory, memory_from_settings, repo_tag
 from .prompts import (
-    DEFAULT_SUBAGENT_PROMPTS, MEMORY_PROMPT, ORCHESTRATOR_PROMPT, SHIP_APPROVAL,
+    DEFAULT_SUBAGENT_PROMPTS,
+    MEMORY_PROMPT,
+    ORCHESTRATOR_PROMPT,
+    SHIP_APPROVAL,
     SHIP_NORMAL,
 )
 from .settings import Settings
@@ -116,6 +123,22 @@ def make_memory_tools(memory: Memory, repo_name: str, task_id: str):
     return search_memory, save_memory
 
 
+def make_check_messages_tool(drain: Callable[[], list[str]]):
+    @tool
+    async def check_messages() -> str:
+        """Check for steering messages the operator has sent while you work.
+        Call this periodically during long tasks and ALWAYS right before you
+        open the pull request, so you can incorporate late guidance. Returns
+        any pending operator messages, or a note that there are none."""
+        msgs = drain()
+        if not msgs:
+            return "No new operator messages."
+        return "Operator messages (incorporate these now):\n" + \
+            "\n".join(f"- {m}" for m in msgs)
+
+    return check_messages
+
+
 async def build_agent(
     ws: Workspace,
     task_description: str,
@@ -123,18 +146,27 @@ async def build_agent(
     settings: Settings,
     model_override: str | None = None,
     on_event: Callable[[str, dict], Awaitable[None]] | None = None,
+    sandbox_container: str | None = None,
+    drain_messages: Callable[[], list[str]] | None = None,
 ) -> BuiltAgent:
-    backend = LocalShellBackend(
-        root_dir=ws.path,
-        virtual_mode=True,
-        timeout=600,
-        max_output_bytes=60000,
-        env=_shell_env(),
-    )
+    if sandbox_container:
+        from .sandbox import DockerShellBackend
+        backend = DockerShellBackend(ws.path, sandbox_container,
+                                     timeout=600, max_output_bytes=60000)
+    else:
+        backend = LocalShellBackend(
+            root_dir=ws.path,
+            virtual_mode=True,
+            timeout=600,
+            max_output_bytes=60000,
+            env=_shell_env(),
+        )
 
     result: dict[str, str | None] = {"pr_url": None, "pr_title": None,
                                      "pr_body": None}
     tools: list = [make_pr_tool(ws, settings, result, on_event)]
+    if drain_messages is not None:
+        tools.append(make_check_messages_tool(drain_messages))
     tools.extend(await load_mcp_tools(agents_cfg.mcp_servers))
 
     memory = memory_from_settings(settings)
