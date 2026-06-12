@@ -1,12 +1,12 @@
-# Codebase registry. Each entry teaches the agent about one repository.
-# repos:
-#   backend:
-#     url: git@github.com:acme/backend.git   # or https://, or a local path
-#     default_branch: main
-#     description: "Python FastAPI monolith serving the public API"
-#     setup: "uv sync"                        # run after clone (optional)
-#     test: "uv run pytest -x -q"             # how the agent verifies its work
-#     context:                                # docs the agent should read first
-#       - docs/architecture.md
-#       - CONTRIBUTING.md
-repos: {}
+repos:
+  calc-demo:
+    url: /tmp/devagent-demo
+    default_branch: main
+    description: demo calculator
+    setup: null
+    test: python3 test_calc.py
+    context: []
+    sandbox: true
+    sandbox_image: null
+    sandbox_network: none
+    approval: null

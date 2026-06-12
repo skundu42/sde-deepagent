@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+from pathlib import Path
 
 from deepagents.backends import LocalShellBackend
 from deepagents.backends.protocol import ExecuteResponse
@@ -43,12 +44,14 @@ def start_container(task_id: str, workspace_path: str, *, image: str,
     subprocess.run(["docker", "rm", "-f", name], capture_output=True)  # clear any stale one
     if network not in ("none", "bridge"):
         network = "none"
+    # docker -v needs an absolute host path, else it's read as a named volume
+    abs_workspace = str(Path(workspace_path).resolve())
     cmd = [
         "docker", "run", "-d", "--name", name,
         "--network", network,
         "--memory", memory, "--cpus", cpus,
         "--pids-limit", "512",
-        "-v", f"{workspace_path}:/workspace",
+        "-v", f"{abs_workspace}:/workspace",
         "-w", "/workspace",
         image, "sleep", "infinity",
     ]

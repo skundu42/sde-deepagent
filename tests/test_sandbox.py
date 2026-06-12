@@ -66,12 +66,15 @@ def test_start_container_command(monkeypatch):
     monkeypatch.setattr(sandbox.subprocess, "run",
                         lambda args, **k: seen.append(args) or
                         SimpleNamespace(returncode=0, stdout="", stderr=""))
-    name = sandbox.start_container("t1", "/ws", image="python:3.12-slim",
+    name = sandbox.start_container("t1", "data/workspaces/t1/repo",
+                                   image="python:3.12-slim",
                                    network="none", memory="2g", cpus="2")
     assert name == "sde-task-t1"
     run_cmd = seen[-1]
     assert "--network" in run_cmd and run_cmd[run_cmd.index("--network") + 1] == "none"
-    assert "-v" in run_cmd and "/ws:/workspace" in run_cmd
+    # the bind mount must be an ABSOLUTE path (relative reads as a named volume)
+    mount = run_cmd[run_cmd.index("-v") + 1]
+    assert mount.startswith("/") and mount.endswith(":/workspace")
     assert "python:3.12-slim" in run_cmd
 
 
