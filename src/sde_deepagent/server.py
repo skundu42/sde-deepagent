@@ -27,7 +27,7 @@ from .intake.slack import SlackIntake
 from .intake.telegram import TelegramIntake
 from .memory import GLOBAL_TAG, memory_from_settings, repo_tag
 from .runner import TaskRunner
-from .settings import get_settings
+from .settings import get_settings, validate_control_plane_security
 from .worker import Worker
 
 logger = logging.getLogger(__name__)
@@ -77,6 +77,7 @@ class SteerMessage(BaseModel):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
+    validate_control_plane_security(settings)
     db = Database(settings.db_path)
     await db.connect()
     bus = EventBus()
@@ -142,6 +143,9 @@ def create_app() -> FastAPI:
     if settings.auth_token:
         from .auth import AuthMiddleware
         app.add_middleware(AuthMiddleware, token=settings.auth_token)
+    else:
+        from .auth import LocalOnlyMiddleware
+        app.add_middleware(LocalOnlyMiddleware)
 
     # ---- health & stats ----
 
@@ -250,6 +254,7 @@ def create_app() -> FastAPI:
         from .gitops import (
             GitError,
             Workspace,
+            control_git_dir_for,
             create_pull_request,
             push_branch,
             workspace_root_for,
@@ -262,7 +267,12 @@ def create_app() -> FastAPI:
         path = workspace_root_for(s, task.repo, task.id) / "repo"
         if not path.exists():
             raise HTTPException(409, "workspace no longer on disk — re-run the task")
-        ws = Workspace(task_id=task.id, repo=repo, path=path, branch=task.branch)
+        ws = Workspace(
+            task_id=task.id, repo=repo, path=path, branch=task.branch,
+            control_git_dir=control_git_dir_for(s, repo.name, task.id),
+        )
+        if not ws.control_git_dir.exists():
+            raise HTTPException(409, "trusted Git metadata no longer on disk — re-run the task")
         await push_branch(ws, s)
         events = await request.app.state.db.list_events(task.id)
         proposal = next((e["content"] for e in reversed(events)

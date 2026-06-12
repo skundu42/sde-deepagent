@@ -3,6 +3,7 @@ else (intake channels, GitHub PRs) activates when its key is present."""
 
 from __future__ import annotations
 
+import ipaddress
 import os
 from pathlib import Path
 
@@ -57,7 +58,7 @@ class Settings(BaseSettings):
     github_review_poll_seconds: int = 120
 
     # --- server / runtime ---
-    host: str = "0.0.0.0"
+    host: str = "127.0.0.1"
     port: int = 8321
     auth_token: str | None = None  # if set, API + SSE require this bearer token
     data_dir: Path = Path("data")
@@ -99,12 +100,36 @@ class Settings(BaseSettings):
         return self.data_dir / "workspaces"
 
     @property
+    def control_git_dir(self) -> Path:
+        """Trusted Git metadata, deliberately outside sandbox-mounted workspaces."""
+        return self.data_dir / "control-git"
+
+    @property
     def sandbox_state_path(self) -> Path:
         """Last-use timestamps for sandbox containers (drives the idle reaper)."""
         return self.data_dir / "sandbox-usage.json"
 
     def telegram_allowed_chat_ids(self) -> set[int]:
         return {int(c) for c in self.telegram_allowed_chats.split(",") if c.strip()}
+
+
+def is_loopback_host(host: str) -> bool:
+    """Whether a bind host is limited to this machine."""
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def validate_control_plane_security(settings: Settings) -> None:
+    """Refuse an unauthenticated control plane reachable from the network."""
+    if not settings.auth_token and not is_loopback_host(settings.host):
+        raise RuntimeError(
+            f"refusing unauthenticated network bind on {settings.host!r}; "
+            "set AUTH_TOKEN or bind HOST to 127.0.0.1/::1"
+        )
 
 
 _settings: Settings | None = None
@@ -129,5 +154,6 @@ def get_settings() -> Settings:
         _settings = Settings()
         _settings.data_dir.mkdir(parents=True, exist_ok=True)
         _settings.workspaces_dir.mkdir(parents=True, exist_ok=True)
+        _settings.control_git_dir.mkdir(parents=True, exist_ok=True)
         _export_provider_keys(_settings)
     return _settings

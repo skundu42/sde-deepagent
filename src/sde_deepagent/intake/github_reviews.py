@@ -12,6 +12,7 @@ import re
 import httpx
 
 from ..db import Database
+from ..gitops import GitError, github_api_for_host, trusted_github_hosts
 from ..settings import Settings
 
 logger = logging.getLogger(__name__)
@@ -45,9 +46,9 @@ class GithubReviewIntake:
             self._task.cancel()
 
     def _api_base(self, host: str) -> str:
-        if host == "github.com":
-            return self.settings.github_api_url
-        return f"https://{host}/api/v3"
+        if host.lower() not in trusted_github_hosts(self.settings):
+            raise GitError(f"refusing GitHub review token access to untrusted host '{host}'")
+        return github_api_for_host(self.settings, host)
 
     async def _loop(self) -> None:
         while True:

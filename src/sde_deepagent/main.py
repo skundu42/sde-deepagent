@@ -8,7 +8,7 @@ import logging
 import uvicorn
 
 from .server import create_app
-from .settings import get_settings
+from .settings import get_settings, validate_control_plane_security
 
 app = create_app()
 
@@ -19,6 +19,7 @@ def main() -> None:
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
     )
     settings = get_settings()
+    validate_control_plane_security(settings)
     if not any([settings.anthropic_api_key, settings.google_api_key,
                 settings.openai_api_key]):
         logging.warning(

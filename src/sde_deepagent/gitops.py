@@ -11,6 +11,7 @@ import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlparse
 
 import httpx
 
@@ -42,8 +43,9 @@ async def run_cmd(
     return proc.returncode or 0, out.decode(errors="replace")
 
 
-async def git(args: list[str], cwd: Path, timeout: int = 300, check: bool = True) -> str:
-    code, out = await run_cmd(["git", *args], cwd=cwd, timeout=timeout)
+async def git(args: list[str], cwd: Path, timeout: int = 300, check: bool = True,
+              env: dict[str, str] | None = None) -> str:
+    code, out = await run_cmd(["git", *args], cwd=cwd, timeout=timeout, env=env)
     if check and code != 0:
         raise GitError(f"git {' '.join(args)} failed ({code}):\n{out[-2000:]}")
     return out
@@ -64,27 +66,58 @@ def parse_remote(url: str) -> tuple[str, str, str] | None:
     return host, m.group("owner"), m.group("repo")
 
 
-def auth_env(url: str, token: str | None) -> dict[str, str] | None:
+def trusted_github_hosts(settings: Settings) -> set[str]:
+    """Hosts that may receive GITHUB_TOKEN.
+
+    github.com is always supported. A GitHub Enterprise host is trusted only
+    when GITHUB_API_URL explicitly points at that same host.
+    """
+    hosts = {"github.com"}
+    api_host = urlparse(settings.github_api_url).hostname
+    if api_host and api_host != "api.github.com":
+        hosts.add(api_host.lower())
+    return hosts
+
+
+def auth_env(url: str, token: str | None,
+             allowed_hosts: set[str] | None = None) -> dict[str, str] | None:
     """Ephemeral git auth for https remotes via GIT_CONFIG_* env vars.
 
     The Authorization header exists only for the lifetime of the git process —
     unlike a token-in-URL remote, nothing is persisted into the workspace's
     .git/config where the agent's shell could read it."""
-    if not token or not url.startswith("http") or not parse_remote(url):
+    parsed = parse_remote(url)
+    if not token or not url.startswith("https://") or not parsed:
+        return None
+    host = parsed[0].lower()
+    if host not in (allowed_hosts or {"github.com"}):
         return None
     b64 = base64.b64encode(f"x-access-token:{token}".encode()).decode()
     return {
-        "GIT_CONFIG_COUNT": "1",
-        "GIT_CONFIG_KEY_0": "http.extraHeader",
+        "GIT_CONFIG_COUNT": "2",
+        # Scope the credential to the exact registered remote. Redirects and
+        # unrelated hosts must never receive the GitHub token.
+        "GIT_CONFIG_KEY_0": f"http.{url.rstrip('/')}.extraHeader",
         "GIT_CONFIG_VALUE_0": f"AUTHORIZATION: basic {b64}",
+        "GIT_CONFIG_KEY_1": "http.followRedirects",
+        "GIT_CONFIG_VALUE_1": "false",
     }
 
 
-def _git_env(extra: dict[str, str] | None) -> dict[str, str] | None:
-    """Merge auth vars into the full process env (env= replaces, not extends)."""
-    if not extra:
-        return None
-    return {**os.environ, **extra}
+SAFE_GIT_ENV_KEYS = ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "USER")
+
+
+def _git_env(extra: dict[str, str] | None = None) -> dict[str, str]:
+    """Minimal environment for trusted Git; provider/service secrets stay out."""
+    env = {k: v for k in SAFE_GIT_ENV_KEYS if (v := os.environ.get(k))}
+    env.update({
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_TERMINAL_PROMPT": "0",
+    })
+    if extra:
+        env.update(extra)
+    return env
 
 
 @dataclass
@@ -93,6 +126,45 @@ class Workspace:
     repo: RepoConfig
     path: Path  # the cloned repository root
     branch: str
+    control_git_dir: Path
+
+
+def control_git_dir_for(settings: Settings, repo_name: str, task_id: str) -> Path:
+    return settings.control_git_dir / repo_slug(repo_name) / f"{task_id}.git"
+
+
+def github_api_for_host(settings: Settings, remote_host: str) -> str:
+    """Return the configured API URL only when it matches the remote host."""
+    host = remote_host.lower()
+    api = settings.github_api_url.rstrip("/")
+    parsed_api = urlparse(api)
+    api_host = (parsed_api.hostname or "").lower()
+    expected_api_host = "api.github.com" if host == "github.com" else host
+    if parsed_api.scheme != "https" or api_host != expected_api_host:
+        raise GitError(
+            f"refusing to send GITHUB_TOKEN to API URL '{api}'; expected HTTPS "
+            f"on host '{expected_api_host}' for remote host '{host}'"
+        )
+    return api
+
+
+async def control_git(
+    ws: Workspace, args: list[str], timeout: int = 300, check: bool = True,
+    env: dict[str, str] | None = None,
+) -> str:
+    """Run Git against protected metadata, never the workspace-controlled .git."""
+    cmd = [
+        "git",
+        f"--git-dir={ws.control_git_dir}",
+        f"--work-tree={ws.path}",
+        "-c", f"core.hooksPath={os.devnull}",
+        "-c", f"core.attributesFile={os.devnull}",
+        *args,
+    ]
+    code, out = await run_cmd(cmd, cwd=ws.path, timeout=timeout, env=env or _git_env())
+    if check and code != 0:
+        raise GitError(f"trusted git {' '.join(args)} failed ({code}):\n{out[-2000:]}")
+    return out
 
 
 def branch_name_for(task_id: str, title: str) -> str:
@@ -141,7 +213,8 @@ async def prepare_workspace(
     repo_dir = ws_root / "repo"
 
     # the remote URL stays token-free; auth rides in process-scoped env config
-    env = _git_env(auth_env(repo.url, settings.github_token))
+    env = _git_env(auth_env(
+        repo.url, settings.github_token, trusted_github_hosts(settings)))
     clone_branch = existing_branch or repo.default_branch
     code, out = await run_cmd(
         ["git", "clone", "--depth", "50", "--branch", clone_branch, repo.url,
@@ -155,8 +228,11 @@ async def prepare_workspace(
         if code != 0:
             raise GitError(f"clone of {repo.url} failed:\n{out[-2000:]}")
         if existing_branch:
-            out = await git(["checkout", existing_branch], cwd=repo_dir, check=False)
-            head = await git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_dir)
+            safe_env = _git_env()
+            out = await git(["checkout", existing_branch], cwd=repo_dir, check=False,
+                            env=safe_env)
+            head = await git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_dir,
+                             env=safe_env)
             if head.strip() != existing_branch:
                 raise GitError(
                     f"branch '{existing_branch}' not found on {repo.url} — cannot "
@@ -166,38 +242,60 @@ async def prepare_workspace(
         branch = existing_branch
     else:
         branch = branch_name_for(task_id, title)
-        await git(["checkout", "-b", branch], cwd=repo_dir)
-    await git(["config", "user.name", "sde-deepagent"], cwd=repo_dir)
-    await git(["config", "user.email", "sde-deepagent@localhost"], cwd=repo_dir)
+        await git(["checkout", "-b", branch], cwd=repo_dir, env=_git_env())
+    await git(["config", "user.name", "sde-deepagent"], cwd=repo_dir, env=_git_env())
+    await git(["config", "user.email", "sde-deepagent@localhost"], cwd=repo_dir,
+              env=_git_env())
     _write_junk_excludes(repo_dir)
-    return Workspace(task_id=task_id, repo=repo, path=repo_dir, branch=branch)
+
+    # Controller Git operations use a protected copy of the freshly-created
+    # metadata. The sandbox can mutate repo/.git freely, but the host never
+    # executes or trusts it after this point.
+    control_dir = control_git_dir_for(settings, repo.name, task_id)
+    if control_dir.exists():
+        shutil.rmtree(control_dir)
+    control_dir.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(repo_dir / ".git", control_dir)
+    ws = Workspace(task_id=task_id, repo=repo, path=repo_dir, branch=branch,
+                   control_git_dir=control_dir)
+    await control_git(ws, ["config", "user.name", "sde-deepagent"])
+    await control_git(ws, ["config", "user.email", "sde-deepagent@localhost"])
+    await control_git(ws, ["remote", "set-url", "origin", repo.url])
+    return ws
 
 
 async def has_changes(ws: Workspace) -> bool:
-    out = await git(["status", "--porcelain"], cwd=ws.path)
+    out = await control_git(ws, ["status", "--porcelain"])
     return bool(out.strip())
 
 
 async def commits_ahead(ws: Workspace) -> int:
     try:
-        out = await git(
-            ["rev-list", "--count", f"origin/{ws.repo.default_branch}..HEAD"], cwd=ws.path
-        )
+        out = await control_git(
+            ws, ["rev-list", "--count", f"origin/{ws.repo.default_branch}..HEAD"])
         return int(out.strip())
     except (GitError, ValueError):
         return 0
 
 
 async def commit_all(ws: Workspace, message: str) -> str:
-    await git(["add", "-A"], cwd=ws.path)
-    out = await git(["commit", "-m", message], cwd=ws.path, check=False)
+    await control_git(ws, ["add", "-A"])
+    out = await control_git(ws, ["commit", "-m", message], check=False)
     return out
 
 
 async def push_branch(ws: Workspace, settings: Settings) -> None:
-    env = _git_env(auth_env(ws.repo.url, settings.github_token))
+    env = _git_env(auth_env(
+        ws.repo.url, settings.github_token, trusted_github_hosts(settings)))
+    expected = (await control_git(
+        ws, ["for-each-ref", "--format=%(objectname)",
+             f"refs/remotes/origin/{ws.branch}"],
+    )).strip()
+    lease = f"--force-with-lease=refs/heads/{ws.branch}:{expected}"
     proc = await asyncio.create_subprocess_exec(
-        "git", "push", "-f", "origin", f"HEAD:refs/heads/{ws.branch}",
+        "git", f"--git-dir={ws.control_git_dir}", f"--work-tree={ws.path}",
+        "-c", f"core.hooksPath={os.devnull}",
+        "push", lease, ws.repo.url, f"HEAD:refs/heads/{ws.branch}",
         cwd=str(ws.path), env=env,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
     )
@@ -209,12 +307,15 @@ async def push_branch(ws: Workspace, settings: Settings) -> None:
     if proc.returncode != 0:
         raise GitError(f"git push failed ({proc.returncode}):\n"
                        f"{out.decode(errors='replace')[-2000:]}")
+    # A URL push does not reliably update origin/* tracking refs. Record the
+    # successfully pushed commit so retries retain force-with-lease protection.
+    await control_git(
+        ws, ["update-ref", f"refs/remotes/origin/{ws.branch}", "HEAD"])
 
 
 async def diff_stat(ws: Workspace) -> str:
-    return await git(
-        ["diff", "--stat", f"origin/{ws.repo.default_branch}...HEAD"], cwd=ws.path, check=False
-    )
+    return await control_git(
+        ws, ["diff", "--stat", f"origin/{ws.repo.default_branch}...HEAD"], check=False)
 
 
 async def create_pull_request(
@@ -230,9 +331,12 @@ async def create_pull_request(
     if not settings.github_token:
         raise GitError("GITHUB_TOKEN is not set — cannot create a pull request")
     host, owner, repo = parsed
-    api = settings.github_api_url
-    if host != "github.com" and api == "https://api.github.com":
-        api = f"https://{host}/api/v3"  # GitHub Enterprise convention
+    if host.lower() not in trusted_github_hosts(settings):
+        raise GitError(
+            f"refusing to send GITHUB_TOKEN to untrusted host '{host}'; "
+            "configure GITHUB_API_URL for the GitHub Enterprise host"
+        )
+    api = github_api_for_host(settings, host)
 
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(
@@ -291,5 +395,7 @@ def prune_workspaces(settings: Settings, keep: int | None = None,
         if protect and d.name in protect:
             continue
         shutil.rmtree(d, ignore_errors=True)
+        for control_dir in settings.control_git_dir.glob(f"*/{d.name}.git"):
+            shutil.rmtree(control_dir, ignore_errors=True)
         deleted.append(d.name)
     return deleted

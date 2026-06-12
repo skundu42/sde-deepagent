@@ -12,6 +12,8 @@ def temp_env(tmp_path, monkeypatch):
     monkeypatch.setenv("CONTEXT_DIR", str(tmp_path / "context"))
     monkeypatch.setenv("UI_DIR", str(tmp_path / "ui"))
     monkeypatch.setenv("MAX_CONCURRENT_TASKS", "0")  # keep the worker idle in tests
+    monkeypatch.setenv("HOST", "127.0.0.1")
+    monkeypatch.setenv("AUTH_TOKEN", "")
     # empty strings (not delenv): env vars take precedence over the project's
     # real .env file, which Settings would otherwise read from the test cwd
     for key in ("ANTHROPIC_API_KEY", "GOOGLE_API_KEY", "OPENAI_API_KEY",

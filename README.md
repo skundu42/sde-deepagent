@@ -67,23 +67,16 @@ Edit `.env` with at minimum one model key, and a `GITHUB_TOKEN` so the agent can
 ```bash
 OPENAI_API_KEY=sk-...        # and/or ANTHROPIC_API_KEY / GOOGLE_API_KEY
 GITHUB_TOKEN=ghp_...
+AUTH_TOKEN=<openssl-rand-hex-32>
 DAILY_BUDGET_USD=50          # strongly recommended on a server
 REQUIRE_APPROVAL=true        # recommended until you trust it unattended
 ```
 
 ### 2. Lock the ports to localhost
 
-The UI and API have **no built-in authentication** — they must only be reachable through your reverse proxy. Create a `docker-compose.override.yml`:
-
-```yaml
-services:
-  sde-deepagent:
-    ports: !override
-      - "127.0.0.1:8321:8321"
-  supermemory:
-    ports: !override
-      - "127.0.0.1:6767:6767"
-```
+Docker Compose requires `AUTH_TOKEN` and publishes both ports on localhost only.
+The service also refuses any non-loopback bind without `AUTH_TOKEN`, so an
+accidental configuration change cannot expose an unauthenticated control plane.
 
 ### 3. Start and wire up memory
 
@@ -271,10 +264,11 @@ GET/POST/DELETE /api/resources                            POST /webhooks/linear
 
 Defense in depth, each layer independently configurable:
 
-- **API auth** — set `AUTH_TOKEN` and every `/api/*` request and SSE stream requires a bearer token (header, or `?token=` for EventSource). Health and the HMAC-verified Linear webhook stay open; the UI prompts for the token and remembers it for the session. Still front production with TLS.
+- **API auth** — every non-loopback bind requires `AUTH_TOKEN`; otherwise startup fails. Every `/api/*` request and SSE stream then requires the bearer token (header, or `?token=` for EventSource). Health and the HMAC-verified Linear webhook stay open; the UI prompts for the token and remembers it for the session. Still front production with TLS.
 - **Per-repo container sandbox (on by default)** — each task's shell runs in its repo's Docker container with only that repo's workspaces bind-mounted: arbitrary build/test commands and untrusted repo code can't reach the host filesystem or other repos' workspaces. Environments are **zero-config**: the container starts from a generic, language-agnostic Debian build image (`buildpack-deps:bookworm`) and the agent installs whatever toolchain and dependencies the repo needs; the container is **reused across tasks** (reaped after 24 idle hours, `SANDBOX_IDLE_HOURS`), so installs and caches persist instead of repeating. Tune per repo or globally: pin a stack image (`sandbox_image` / `SANDBOX_IMAGE`), cut egress for untrusted code (`sandbox_network: none` / `SANDBOX_NETWORK=none` — self-bootstrapping then needs a pinned image or `setup`), or opt out entirely (`sandbox: false` / `SANDBOX_DEFAULT=false` to run on the host). If sandboxing applies but Docker is unavailable, the task **fails** rather than silently running on the host. (Mount `/var/run/docker.sock` into the devagent container for the compose deployment.)
 - **Prompt-injection resistance** — the orchestrator treats all repository content, documents, web pages, and memory entries as untrusted *data*, never instructions; operator guidance arrives only through the steering channel.
 - **Sanitized shell env** — API keys are never visible to the agent's shell; git credentials use process-scoped ephemeral config, never written to disk.
+- **Trusted Git shipping** — controller commits, diffs, and pushes use protected Git metadata outside sandbox mounts, with hooks disabled, a minimal environment, exact-URL credentials, and trusted-host checks.
 - **Approval gate** — global `REQUIRE_APPROVAL=true` or per-repo `approval: required` holds work for human review before any push; `approval: auto` lets trusted repos flow.
 - Restrict Telegram with `TELEGRAM_ALLOWED_CHATS`; set `LINEAR_WEBHOOK_SECRET` if you expose that webhook.
 

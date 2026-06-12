@@ -1,8 +1,9 @@
-"""Optional bearer-token auth for the API. When AUTH_TOKEN is set, every
-/api/* request (except health) and the SSE streams must present the token —
-via `Authorization: Bearer <token>` or, for EventSource which cannot set
-headers, a `?token=<token>` query param. The static UI shell and the
-HMAC-verified Linear webhook are exempt."""
+"""Control-plane access middleware.
+
+With AUTH_TOKEN, API and SSE requests require the bearer token. Without one,
+the entire app is limited to loopback clients, regardless of the ASGI server's
+bind address. This prevents an alternate Uvicorn/Gunicorn invocation from
+accidentally exposing the unauthenticated control plane."""
 
 from __future__ import annotations
 
@@ -11,6 +12,8 @@ import hmac
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
+
+from .settings import is_loopback_host
 
 # Paths reachable without a token even when auth is on.
 PUBLIC_PATHS = {"/api/health"}
@@ -36,4 +39,17 @@ class AuthMiddleware(BaseHTTPMiddleware):
             given = _present_token(request)
             if not given or not hmac.compare_digest(given, self.token):
                 return JSONResponse({"detail": "unauthorized"}, status_code=401)
+        return await call_next(request)
+
+
+class LocalOnlyMiddleware(BaseHTTPMiddleware):
+    """Reject every non-loopback request when application auth is disabled."""
+
+    async def dispatch(self, request: Request, call_next):
+        client_host = request.client.host if request.client else ""
+        if not is_loopback_host(client_host):
+            return JSONResponse(
+                {"detail": "AUTH_TOKEN is required for non-loopback access"},
+                status_code=403,
+            )
         return await call_next(request)

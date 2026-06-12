@@ -2,11 +2,14 @@ services:
   devagent:
     build: .
     ports:
-      - "8321:8321"
+      - "127.0.0.1:8321:8321"
     env_file: .env
     environment:
       # inside the compose network, supermemory is reachable by service name
       SUPERMEMORY_BASE_URL: http://supermemory:6767
+      # The app binds 0.0.0.0 inside the container, so fail compose startup
+      # unless the control plane has application-level authentication.
+      AUTH_TOKEN: ${AUTH_TOKEN:?Set AUTH_TOKEN in .env before starting compose}
     volumes:
       - ./config:/app/config     # agents.yaml + repos.yaml (hot-editable)
       - ./context:/app/context   # drop company docs here
@@ -41,7 +44,7 @@ services:
       # inside the same volume that caches the downloaded binary
       SUPERMEMORY_DATA_DIR: /root/.supermemory/data
     ports:
-      - "6767:6767"
+      - "127.0.0.1:6767:6767"
     volumes:
       - supermemory-data:/root/.supermemory
     restart: unless-stopped

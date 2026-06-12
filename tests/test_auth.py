@@ -6,6 +6,7 @@ import pytest
 
 import sde_deepagent.settings as settings_mod
 from sde_deepagent.server import create_app
+from sde_deepagent.settings import Settings, validate_control_plane_security
 
 
 @pytest.fixture
@@ -63,3 +64,24 @@ async def test_no_auth_when_unset(temp_env):
             async with httpx.AsyncClient(transport=transport,
                                          base_url="http://test") as client:
                 assert (await client.get("/api/tasks")).status_code == 200
+
+
+async def test_no_auth_rejects_non_loopback_client(temp_env):
+    app = create_app()
+    transport = httpx.ASGITransport(app=app, client=("203.0.113.10", 12345))
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            assert (await client.get("/")).status_code == 403
+            assert (await client.get("/api/health")).status_code == 403
+
+
+def test_non_loopback_bind_requires_auth():
+    with pytest.raises(RuntimeError, match="refusing unauthenticated network bind"):
+        validate_control_plane_security(Settings(_env_file=None, host="0.0.0.0", auth_token=None))
+    validate_control_plane_security(
+        Settings(_env_file=None, host="0.0.0.0", auth_token="strong-token"))
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "::1", "localhost"])
+def test_loopback_bind_can_run_without_auth(host):
+    validate_control_plane_security(Settings(_env_file=None, host=host, auth_token=None))
