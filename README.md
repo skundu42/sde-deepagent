@@ -4,7 +4,7 @@
 
 Built on [LangChain deepagents](https://docs.langchain.com/oss/python/deepagents/overview). The only required external dependency is a model API key (Anthropic, Google Gemini, and/or OpenAI); everything else — queue, storage, UI, event streaming, long-term memory — runs on your own infrastructure.
 
-![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue) ![self--hosted](https://img.shields.io/badge/deployment-self--hosted-green) ![tests](https://img.shields.io/badge/tests-105%20passing-brightgreen)
+![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue) ![self--hosted](https://img.shields.io/badge/deployment-self--hosted-green) ![tests](https://img.shields.io/badge/tests-105%20passing-brightgreen) ![license](https://img.shields.io/badge/license-MIT-blue)
 
 ---
 
