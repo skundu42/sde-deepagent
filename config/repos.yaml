@@ -1,0 +1,15 @@
+repos:
+  calc-demo:
+    url: /tmp/devagent-demo
+    default_branch: main
+    description: Tiny demo calculator library
+    setup: null
+    test: python3 test_calc.py
+    context: []
+  inventory-svc:
+    url: /tmp/inventory-svc
+    default_branch: main
+    description: In-memory inventory service with reporting
+    setup: null
+    test: python3 -m unittest discover -s tests -v
+    context: []

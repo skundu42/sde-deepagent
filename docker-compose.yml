@@ -1,0 +1,58 @@
+services:
+  devagent:
+    build: .
+    ports:
+      - "8321:8321"
+    env_file: .env
+    environment:
+      # inside the compose network, supermemory is reachable by service name
+      SUPERMEMORY_BASE_URL: http://supermemory:6767
+    volumes:
+      - ./config:/app/config     # agents.yaml + repos.yaml (hot-editable)
+      - ./context:/app/context   # drop company docs here
+      - devagent-data:/app/data  # task db + workspaces
+      # Mount your ssh keys if you use git@ remotes instead of GITHUB_TOKEN:
+      # - ~/.ssh:/root/.ssh:ro
+    depends_on:
+      - supermemory
+    restart: unless-stopped
+
+  # Long-term agent memory — self-hosted supermemory (single binary, local
+  # embeddings). It needs one LLM credential of its own (reuses yours).
+  # First run: `docker compose logs supermemory` prints the generated sm_ API
+  # key → put it in .env as SUPERMEMORY_API_KEY. Remove this service (and the
+  # SUPERMEMORY_* vars) if you don't want memory.
+  supermemory:
+    build:
+      context: .
+      dockerfile_inline: |
+        FROM node:22-slim
+        # the supermemory installer needs curl (not in -slim)
+        RUN apt-get update && apt-get install -y --no-install-recommends \
+            curl ca-certificates && rm -rf /var/lib/apt/lists/*
+        # supermemory's encrypted storage is keyed to machine identity — pin it
+        # so recreated containers can still read the volume
+        RUN echo 5f4dcc3b5aa765d61d8327deb882cf99 > /etc/machine-id
+    hostname: supermemory
+    command: npx -y supermemory local
+    env_file: .env   # picks up ANTHROPIC_API_KEY / GOOGLE_API_KEY / OPENAI_*
+    environment:
+      # the binary writes to $SUPERMEMORY_DATA_DIR (default: its cwd) — pin it
+      # inside the same volume that caches the downloaded binary
+      SUPERMEMORY_DATA_DIR: /root/.supermemory/data
+    ports:
+      - "6767:6767"
+    volumes:
+      - supermemory-data:/root/.supermemory
+    restart: unless-stopped
+
+  # Optional: self-hosted Firecrawl for JS-rendered scraping on the Resources
+  # page. It's a multi-service stack (api + worker + redis + playwright) — run
+  # it from the official repo's compose (github.com/firecrawl/firecrawl,
+  # SELF_HOST.md), then point devagent at it:
+  #   FIRECRAWL_API_URL=http://firecrawl-api:3002  (or http://localhost:3002)
+  # Without it, devagent's built-in fetcher handles static pages.
+
+volumes:
+  devagent-data:
+  supermemory-data:
