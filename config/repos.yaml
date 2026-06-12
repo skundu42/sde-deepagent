@@ -1,12 +1,12 @@
 repos:
-  calc-demo:
-    url: /tmp/devagent-demo
+  fable-metro-sumulator:
+    url: https://github.com/skundu42/fable-metro-sumulator
     default_branch: main
-    description: demo calculator
+    description: ''
     setup: null
-    test: python3 test_calc.py
+    test: null
     context: []
-    sandbox: true
+    sandbox: null
     sandbox_image: null
-    sandbox_network: none
+    sandbox_network: null
     approval: null

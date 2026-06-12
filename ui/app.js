@@ -34,7 +34,13 @@ async function api(path, opts = {}, _retried = false) {
   }
   if (!res.ok) {
     let detail = res.statusText;
-    try { detail = (await res.json()).detail || detail; } catch {}
+    try { detail = (await res.json()).detail ?? detail; } catch {}
+    if (Array.isArray(detail)) {  // FastAPI 422: [{loc, msg, ...}, ...]
+      detail = detail.map((d) =>
+        `${(d.loc || []).slice(1).join(".") || "request"}: ${d.msg}`).join("; ");
+    } else if (typeof detail === "object") {
+      detail = JSON.stringify(detail);
+    }
     throw new Error(detail);
   }
   return res.json();
@@ -512,7 +518,7 @@ async function renderRepos() {
         <div class="field">
           <label>Sandbox network</label>
           <select id="r-network">
-            <option value="">default (none)</option>
+            <option value="">server default (bridge)</option>
             <option value="none">none — no egress</option>
             <option value="bridge">bridge — allow egress</option>
           </select>

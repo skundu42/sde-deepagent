@@ -1,31 +1,35 @@
 orchestrator:
   model: openai:gpt-5.4
-  effort: low
+  effort: medium
 subagents:
   explorer:
-    model: openai:gpt-5.4-mini
+    model: openai:gpt-5.4
     description: 'Read-only codebase scout. Use it to find relevant files, understand
       how a subsystem works, or locate where a change must be made. Give it a focused
       question; it returns file paths and explanations, not patches.
 
       '
+    effort: medium
   coder:
-    model: openai:gpt-5.4
+    model: openai:gpt-5.5
     description: 'Implementation specialist. Delegate a well-scoped code change with
       the exact files to touch and the conventions to follow. It edits files and reports
       what it changed.
 
       '
+    effort: medium
   tester:
     model: openai:gpt-5.4
     description: 'Runs the test suite, writes missing tests for the change, and debugs
       failures. Tell it the test command and which behavior to cover.
 
       '
+    effort: null
   reviewer:
     model: openai:gpt-5.4-mini
     description: 'Reviews the final diff for bugs, style violations and missed edge
       cases before the PR is opened. Returns a list of must-fix issues or approval.
 
       '
+    effort: null
 mcp_servers: {}
