@@ -1,5 +1,5 @@
-from devagent.config import ConfigStore, RepoConfig
-from devagent.llm import normalize_model_id
+from sde_deepagent.config import ConfigStore, RepoConfig
+from sde_deepagent.llm import normalize_model_id
 
 import pytest
 
@@ -72,8 +72,8 @@ def test_env_file_keys_reach_process_env(temp_env, tmp_path, monkeypatch):
     """Keys living only in .env must be exported for the provider SDKs."""
     import os
 
-    import devagent.settings as settings_mod
-    from devagent.settings import get_settings
+    import sde_deepagent.settings as settings_mod
+    from sde_deepagent.settings import get_settings
 
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".env").write_text("OPENAI_API_KEY=sk-from-dotenv\n")

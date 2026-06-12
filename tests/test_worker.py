@@ -5,8 +5,8 @@ import asyncio
 
 import pytest
 
-from devagent.db import Database
-from devagent.worker import Worker
+from sde_deepagent.db import Database
+from sde_deepagent.worker import Worker
 
 
 class SlowRunner:

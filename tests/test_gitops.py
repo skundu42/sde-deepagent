@@ -3,12 +3,12 @@ from pathlib import Path
 
 import pytest
 
-from devagent.config import RepoConfig
-from devagent.gitops import (
+from sde_deepagent.config import RepoConfig
+from sde_deepagent.gitops import (
     auth_env, branch_name_for, commit_all, commits_ahead, has_changes,
     parse_remote, prepare_workspace, prune_workspaces, run_cmd,
 )
-from devagent.settings import get_settings
+from sde_deepagent.settings import get_settings
 
 
 @pytest.mark.parametrize("url,expected", [
@@ -42,7 +42,7 @@ def test_auth_env_skipped_when_not_applicable():
 async def test_clone_persists_no_token(temp_env, tmp_path, monkeypatch):
     """Even with GITHUB_TOKEN set, nothing token-like lands in .git/config."""
     monkeypatch.setenv("GITHUB_TOKEN", "ghp_supersecret123")
-    import devagent.settings as settings_mod
+    import sde_deepagent.settings as settings_mod
     settings_mod._settings = None
     origin = tmp_path / "origin2"
     await _make_origin(origin)

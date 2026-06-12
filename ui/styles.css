@@ -1,4 +1,4 @@
-/* devagent · mission control — phosphor terminal aesthetic */
+/* sde-deepagent · mission control — phosphor terminal aesthetic */
 
 :root {
   --bg: #070b09;
@@ -68,8 +68,8 @@ a:hover { text-decoration: underline; }
 .brand:hover { text-decoration: none; }
 .brand-glyph { color: var(--green); font-size: 18px; letter-spacing: 2px; display: block; }
 .brand-name {
-  font-family: var(--disp); font-weight: 700; font-size: 21px;
-  letter-spacing: 3px; color: var(--ink);
+  font-family: var(--disp); font-weight: 700; font-size: 15px;
+  letter-spacing: 1.5px; color: var(--ink);
 }
 .brand-sub { display: block; color: var(--ink-faint); font-size: 11px; margin-top: 2px; }
 .cursor { color: var(--green); animation: blink 1.1s steps(1) infinite; }

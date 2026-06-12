@@ -1,6 +1,6 @@
 import pytest
 
-from devagent.db import Database
+from sde_deepagent.db import Database
 
 
 @pytest.fixture

@@ -3,10 +3,10 @@
 import httpx
 import pytest
 
-from devagent.chat import ChatService, make_chat_tools
-from devagent.config import ConfigStore
-from devagent.db import Database
-from devagent.settings import get_settings
+from sde_deepagent.chat import ChatService, make_chat_tools
+from sde_deepagent.config import ConfigStore
+from sde_deepagent.db import Database
+from sde_deepagent.settings import get_settings
 
 
 @pytest.fixture
@@ -70,7 +70,7 @@ async def test_chat_endpoint(temp_env, monkeypatch):
         return {"session_id": session_id or "sess1", "reply": f"echo: {message}"}
 
     monkeypatch.setattr(ChatService, "ask", fake_ask)
-    from devagent.server import create_app
+    from sde_deepagent.server import create_app
 
     app = create_app()
     async with httpx.ASGITransport(app=app) as transport:

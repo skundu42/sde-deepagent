@@ -1,7 +1,7 @@
 import httpx
 import pytest
 
-from devagent.webfetch import FetchError, fetch_page_text, html_to_text
+from sde_deepagent.webfetch import FetchError, fetch_page_text, html_to_text
 
 SAMPLE = """<!DOCTYPE html><html><head><title>Arch Docs</title>
 <style>body{color:red}</style><script>var x=1;</script></head>
@@ -90,7 +90,7 @@ async def test_firecrawl_failure_falls_back_to_builtin(monkeypatch):
 
 
 def test_firecrawl_url_resolution():
-    from devagent.settings import Settings
+    from sde_deepagent.settings import Settings
 
     assert Settings().firecrawl_url is None
     assert Settings(firecrawl_api_key="fc-k").firecrawl_url == "https://api.firecrawl.dev"

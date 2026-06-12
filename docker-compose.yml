@@ -49,9 +49,9 @@ services:
   # Optional: self-hosted Firecrawl for JS-rendered scraping on the Resources
   # page. It's a multi-service stack (api + worker + redis + playwright) — run
   # it from the official repo's compose (github.com/firecrawl/firecrawl,
-  # SELF_HOST.md), then point devagent at it:
+  # SELF_HOST.md), then point sde-deepagent at it:
   #   FIRECRAWL_API_URL=http://firecrawl-api:3002  (or http://localhost:3002)
-  # Without it, devagent's built-in fetcher handles static pages.
+  # Without it, sde-deepagent's built-in fetcher handles static pages.
 
 volumes:
   devagent-data:

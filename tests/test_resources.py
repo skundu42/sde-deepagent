@@ -6,10 +6,10 @@ import time
 import httpx
 import pytest
 
-from devagent.chat import ChatService
-from devagent.db import Database
-from devagent.memory import GLOBAL_TAG, Memory, repo_tag
-from devagent.server import create_app
+from sde_deepagent.chat import ChatService
+from sde_deepagent.db import Database
+from sde_deepagent.memory import GLOBAL_TAG, Memory, repo_tag
+from sde_deepagent.server import create_app
 
 
 def make_memory(state: dict) -> Memory:
@@ -53,8 +53,8 @@ async def test_resource_lifecycle(client_with_memory, monkeypatch):
     async def fake_fetch(url, timeout=30.0, **kwargs):
         return "Arch Docs", "The API gateway routes to services."
 
-    monkeypatch.setattr("devagent.webfetch.fetch_page_text", fake_fetch)
-    # url into global scope — fetched by devagent, stored as extracted text
+    monkeypatch.setattr("sde_deepagent.webfetch.fetch_page_text", fake_fetch)
+    # url into global scope — fetched by sde-deepagent, stored as extracted text
     r = await client.post("/api/resources",
                           json={"content": "https://docs.example.com/arch"})
     assert r.status_code == 201

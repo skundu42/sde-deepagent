@@ -100,7 +100,7 @@ class LinearIntake:
                         "url": issue["url"]},
         )
         await self._comment(client, issue["id"],
-                            f"🤖 devagent picked this up as task `{task.id}`.")
+                            f"🤖 sde-deepagent picked this up as task `{task.id}`.")
         logger.info("linear issue %s -> task %s", issue["identifier"], task.id)
 
     async def _comment(self, client: httpx.AsyncClient, issue_id: str, body: str) -> None:

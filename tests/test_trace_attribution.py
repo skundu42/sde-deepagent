@@ -2,7 +2,7 @@
 subgraph namespaces don't expose the task tool-call id, so attribution falls
 back to the single in-flight delegation."""
 
-from devagent.runner import TaskRunner
+from sde_deepagent.runner import TaskRunner
 
 
 def _runner() -> TaskRunner:

@@ -101,7 +101,7 @@ async def lifespan(app: FastAPI):
     app.state.memory = memory_from_settings(settings)
     app.state.linear = linear
     app.state.intakes = intakes
-    logger.info("devagent up: %d intake channel(s), max %d concurrent tasks",
+    logger.info("sde-deepagent up: %d intake channel(s), max %d concurrent tasks",
                 len(intakes), settings.max_concurrent_tasks)
     try:
         yield
@@ -113,7 +113,7 @@ async def lifespan(app: FastAPI):
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="devagent", version=__version__, lifespan=lifespan)
+    app = FastAPI(title="sde-deepagent", version=__version__, lifespan=lifespan)
 
     # ---- health & stats ----
 

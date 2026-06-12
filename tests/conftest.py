@@ -2,7 +2,7 @@ import os
 
 import pytest
 
-import devagent.settings as settings_mod
+import sde_deepagent.settings as settings_mod
 
 
 @pytest.fixture

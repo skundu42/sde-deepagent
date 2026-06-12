@@ -7,9 +7,9 @@ import time
 import aiosqlite
 import pytest
 
-from devagent.db import Database
-from devagent.pricing import BudgetExceeded, CostTracker
-from devagent.worker import Worker, _utc_midnight_ts
+from sde_deepagent.db import Database
+from sde_deepagent.pricing import BudgetExceeded, CostTracker
+from sde_deepagent.worker import Worker, _utc_midnight_ts
 
 
 # ---- runner-level per-task budget check ----
@@ -23,7 +23,7 @@ class _Emits:
 
 
 async def test_enforce_budget_warns_then_raises(temp_env):
-    from devagent.runner import TaskRunner
+    from sde_deepagent.runner import TaskRunner
 
     runner = TaskRunner.__new__(TaskRunner)  # no db/bus needed for this check
     sink = _Emits()

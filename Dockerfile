@@ -18,4 +18,4 @@ RUN uv sync --frozen --no-dev
 EXPOSE 8321
 ENV HOST=0.0.0.0 PORT=8321
 
-CMD ["uv", "run", "--no-sync", "devagent"]
+CMD ["uv", "run", "--no-sync", "sde-deepagent"]

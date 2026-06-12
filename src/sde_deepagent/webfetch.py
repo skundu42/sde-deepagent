@@ -117,7 +117,7 @@ async def fetch_page_text(url: str, timeout: float = 30.0,
     try:
         async with httpx.AsyncClient(
             timeout=timeout, follow_redirects=True,
-            headers={"User-Agent": "devagent-resource-ingest/1.0"},
+            headers={"User-Agent": "sde-deepagent-resource-ingest/1.0"},
         ) as client:
             resp = await client.get(url)
             resp.raise_for_status()

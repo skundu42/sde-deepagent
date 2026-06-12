@@ -3,7 +3,7 @@ import asyncio
 import httpx
 import pytest
 
-from devagent.server import create_app
+from sde_deepagent.server import create_app
 
 
 @pytest.fixture

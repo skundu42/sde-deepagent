@@ -1,4 +1,4 @@
-"""Entrypoint: `devagent` (or `uv run devagent`) starts the server, the worker
+"""Entrypoint: `sde-deepagent` (or `uv run sde-deepagent`) starts the server, the worker
 pool, and every configured intake channel in one process."""
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ def main() -> None:
             "No model API key configured! Set ANTHROPIC_API_KEY, GOOGLE_API_KEY "
             "and/or OPENAI_API_KEY in .env — tasks will fail until you do."
         )
-    uvicorn.run("devagent.main:app", host=settings.host, port=settings.port, log_level="info")
+    uvicorn.run("sde_deepagent.main:app", host=settings.host, port=settings.port, log_level="info")
 
 
 if __name__ == "__main__":

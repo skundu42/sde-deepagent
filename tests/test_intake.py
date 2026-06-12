@@ -1,5 +1,5 @@
-from devagent.db import Task
-from devagent.intake.base import parse_task_text, task_summary
+from sde_deepagent.db import Task
+from sde_deepagent.intake.base import parse_task_text, task_summary
 
 
 def test_parse_plain():

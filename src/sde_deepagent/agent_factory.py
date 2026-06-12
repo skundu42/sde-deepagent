@@ -185,7 +185,7 @@ async def build_agent(
         system_prompt=system_prompt,
         subagents=subagents,
         backend=backend,
-        name="devagent-orchestrator",
+        name="sde-deepagent-orchestrator",
     )
     return BuiltAgent(agent=agent, workspace=ws, result=result)
 

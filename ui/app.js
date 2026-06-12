@@ -1,4 +1,4 @@
-/* devagent mission control — vanilla JS SPA over the REST + SSE API */
+/* sde-deepagent mission control — vanilla JS SPA over the REST + SSE API */
 
 const $ = (sel, el = document) => el.querySelector(sel);
 const main = $("#main");
@@ -547,10 +547,10 @@ function renderChatMsgs() {
   if (!thread) return;
   thread.innerHTML = chatState.msgs.map((m) => `
     <div class="chat-msg ${m.role}">
-      <span class="chat-who">${m.role === "user" ? "&gt; you" : "▚▞ devagent"}${m.cost ? ` <i class="chat-cost">$${m.cost.toFixed(4)}</i>` : ""}</span>
+      <span class="chat-who">${m.role === "user" ? "&gt; you" : "▚▞ sde-deepagent"}${m.cost ? ` <i class="chat-cost">$${m.cost.toFixed(4)}</i>` : ""}</span>
       <div class="chat-text">${esc(m.text)}</div>
     </div>`).join("") +
-    (chatState.waiting ? `<div class="chat-msg assistant"><span class="chat-who">▚▞ devagent</span>
+    (chatState.waiting ? `<div class="chat-msg assistant"><span class="chat-who">▚▞ sde-deepagent</span>
       <div class="chat-text thinking">consulting task history<span class="cursor">█</span></div></div>` : "");
   thread.scrollTop = thread.scrollHeight;
 }

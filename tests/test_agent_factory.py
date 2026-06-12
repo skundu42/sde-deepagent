@@ -3,10 +3,10 @@ verify the deepagents wiring: backend, subagents, prompt formatting, PR tool."""
 
 import pytest
 
-from devagent.agent_factory import build_agent
-from devagent.config import ConfigStore, RepoConfig
-from devagent.gitops import prepare_workspace, run_cmd
-from devagent.settings import get_settings
+from sde_deepagent.agent_factory import build_agent
+from sde_deepagent.config import ConfigStore, RepoConfig
+from sde_deepagent.gitops import prepare_workspace, run_cmd
+from sde_deepagent.settings import get_settings
 
 
 @pytest.fixture
@@ -52,8 +52,8 @@ async def test_build_agent(temp_env, dummy_keys, tmp_path):
 
 
 async def test_prompt_contains_task_and_context(temp_env, dummy_keys, tmp_path):
-    from devagent.context import build_context_block
-    from devagent.prompts import ORCHESTRATOR_PROMPT
+    from sde_deepagent.context import build_context_block
+    from sde_deepagent.prompts import ORCHESTRATOR_PROMPT
 
     origin = tmp_path / "o2"
     origin.mkdir()
@@ -62,7 +62,7 @@ async def test_prompt_contains_task_and_context(temp_env, dummy_keys, tmp_path):
     block = build_context_block(origin, repo, get_settings())
     assert "Use 4-space indents." in block
 
-    from devagent.prompts import SHIP_NORMAL
+    from sde_deepagent.prompts import SHIP_NORMAL
 
     rendered = ORCHESTRATOR_PROMPT.format(
         branch="agent/x", repo_name="demo", repo_description="d",

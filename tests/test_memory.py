@@ -5,9 +5,9 @@ import json
 import httpx
 import pytest
 
-from devagent.agent_factory import make_memory_tools
-from devagent.memory import GLOBAL_TAG, Memory, memory_from_settings, repo_tag
-from devagent.settings import Settings
+from sde_deepagent.agent_factory import make_memory_tools
+from sde_deepagent.memory import GLOBAL_TAG, Memory, memory_from_settings, repo_tag
+from sde_deepagent.settings import Settings
 
 
 def make_transport(state: dict) -> httpx.MockTransport:

@@ -159,8 +159,8 @@ async def prepare_workspace(
     else:
         branch = branch_name_for(task_id, title)
         await git(["checkout", "-b", branch], cwd=repo_dir)
-    await git(["config", "user.name", "devagent"], cwd=repo_dir)
-    await git(["config", "user.email", "devagent@localhost"], cwd=repo_dir)
+    await git(["config", "user.name", "sde-deepagent"], cwd=repo_dir)
+    await git(["config", "user.email", "sde-deepagent@localhost"], cwd=repo_dir)
     _write_junk_excludes(repo_dir)
     return Workspace(task_id=task_id, repo=repo, path=repo_dir, branch=branch)
 

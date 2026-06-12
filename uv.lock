@@ -324,55 +324,6 @@ wheels = [
 ]
 
 [[package]]
-name = "devagent"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "aiosqlite" },
-    { name = "deepagents" },
-    { name = "fastapi", extra = ["standard"] },
-    { name = "httpx" },
-    { name = "langchain" },
-    { name = "langchain-anthropic" },
-    { name = "langchain-google-genai" },
-    { name = "langchain-mcp-adapters" },
-    { name = "langchain-openai" },
-    { name = "pydantic-settings" },
-    { name = "pyyaml" },
-    { name = "slack-sdk" },
-    { name = "uvicorn" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "aiosqlite", specifier = ">=0.22.1" },
-    { name = "deepagents", specifier = ">=0.6.8" },
-    { name = "fastapi", extras = ["standard"], specifier = ">=0.136.3" },
-    { name = "httpx", specifier = ">=0.28.1" },
-    { name = "langchain", specifier = ">=1.3.8" },
-    { name = "langchain-anthropic", specifier = ">=1.4.5" },
-    { name = "langchain-google-genai", specifier = ">=4.2.5" },
-    { name = "langchain-mcp-adapters", specifier = ">=0.3.0" },
-    { name = "langchain-openai", specifier = ">=1.3.0" },
-    { name = "pydantic-settings", specifier = ">=2.14.1" },
-    { name = "pyyaml", specifier = ">=6.0.3" },
-    { name = "slack-sdk", specifier = ">=3.42.0" },
-    { name = "uvicorn", specifier = ">=0.49.0" },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "pytest", specifier = ">=8.0" },
-    { name = "pytest-asyncio", specifier = ">=0.25" },
-]
-
-[[package]]
 name = "distro"
 version = "1.9.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1873,6 +1824,55 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/77/65/38ab2f90df44c2febfb63cc10ced40763d9b4bc94d173e734528663fe7f5/rpds_py-2026.5.1-cp315-cp315t-musllinux_1_2_x86_64.whl", hash = "sha256:b1be5c35683684d5331b93600c210e8367c254683d8a6df6bd21bd2da3a334fb", size = 581839, upload-time = "2026-05-28T12:01:48.109Z" },
     { url = "https://files.pythonhosted.org/packages/15/2d/ce1f605fe036aadd460e5822e578c6c7ec3a860936cca37d6e0f299daa77/rpds_py-2026.5.1-cp315-cp315t-win32.whl", hash = "sha256:75808f6c38ce7749bb68cc2770161aae5045e6c6f6781a9782e74b93304399df", size = 207866, upload-time = "2026-05-28T12:01:49.648Z" },
     { url = "https://files.pythonhosted.org/packages/79/cb/966040123eb102371559746908ef2c9471f4d43e17ec9a645a2258dab64b/rpds_py-2026.5.1-cp315-cp315t-win_amd64.whl", hash = "sha256:90bd6630002a1c7f09e7843dd79f0d24f3d2897cc25a753480917865d14f15b3", size = 225441, upload-time = "2026-05-28T12:01:51.408Z" },
+]
+
+[[package]]
+name = "sde-deepagent"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "aiosqlite" },
+    { name = "deepagents" },
+    { name = "fastapi", extra = ["standard"] },
+    { name = "httpx" },
+    { name = "langchain" },
+    { name = "langchain-anthropic" },
+    { name = "langchain-google-genai" },
+    { name = "langchain-mcp-adapters" },
+    { name = "langchain-openai" },
+    { name = "pydantic-settings" },
+    { name = "pyyaml" },
+    { name = "slack-sdk" },
+    { name = "uvicorn" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "aiosqlite", specifier = ">=0.22.1" },
+    { name = "deepagents", specifier = ">=0.6.8" },
+    { name = "fastapi", extras = ["standard"], specifier = ">=0.136.3" },
+    { name = "httpx", specifier = ">=0.28.1" },
+    { name = "langchain", specifier = ">=1.3.8" },
+    { name = "langchain-anthropic", specifier = ">=1.4.5" },
+    { name = "langchain-google-genai", specifier = ">=4.2.5" },
+    { name = "langchain-mcp-adapters", specifier = ">=0.3.0" },
+    { name = "langchain-openai", specifier = ">=1.3.0" },
+    { name = "pydantic-settings", specifier = ">=2.14.1" },
+    { name = "pyyaml", specifier = ">=6.0.3" },
+    { name = "slack-sdk", specifier = ">=3.42.0" },
+    { name = "uvicorn", specifier = ">=0.49.0" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=8.0" },
+    { name = "pytest-asyncio", specifier = ">=0.25" },
 ]
 
 [[package]]

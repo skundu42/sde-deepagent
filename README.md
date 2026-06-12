@@ -1,4 +1,4 @@
-# devagent
+# sde-deepagent
 
 **A self-hostable software developer agent system.** Assign it a task — from the web UI, Telegram, Slack, or Linear — and it clones the right codebase, plans, implements the change, runs the tests, and opens a pull request.
 
@@ -42,7 +42,7 @@ Single process: FastAPI server, asyncio worker pool, SQLite persistence, static 
 git clone https://github.com/skundu42/sde-deepagent.git && cd sde-deepagent
 cp .env.example .env        # add ANTHROPIC_API_KEY / GOOGLE_API_KEY / OPENAI_API_KEY
 uv sync
-uv run devagent             # → http://localhost:8321
+uv run sde-deepagent             # → http://localhost:8321
 ```
 
 Then in the UI: **Codebases** → register a repo (git URL or local path, test command) → **New task** → watch the live agent trace; the PR link appears when it ships.
@@ -57,8 +57,8 @@ The recommended production setup is Docker Compose behind a TLS reverse proxy. A
 # Ubuntu/Debian: install Docker Engine + compose plugin
 curl -fsSL https://get.docker.com | sh
 
-git clone https://github.com/skundu42/sde-deepagent.git /opt/devagent
-cd /opt/devagent
+git clone https://github.com/skundu42/sde-deepagent.git /opt/sde-deepagent
+cd /opt/sde-deepagent
 cp .env.example .env
 ```
 
@@ -77,7 +77,7 @@ The UI and API have **no built-in authentication** — they must only be reachab
 
 ```yaml
 services:
-  devagent:
+  sde-deepagent:
     ports: !override
       - "127.0.0.1:8321:8321"
   supermemory:
@@ -93,7 +93,7 @@ docker compose up -d --build
 # first boot only: copy supermemory's generated API key into .env
 docker compose logs supermemory | grep "api key"
 echo 'SUPERMEMORY_API_KEY=sm_...' >> .env       # paste the printed key
-docker compose up -d                            # recreate devagent with the key
+docker compose up -d                            # recreate sde-deepagent with the key
 ```
 
 `SUPERMEMORY_BASE_URL` is already pointed at the sidecar by the compose file. Verify: `curl -s localhost:8321/api/health` should show `"ok": true` and `"memory": true`.
@@ -103,7 +103,7 @@ docker compose up -d                            # recreate devagent with the key
 Any proxy works; [Caddy](https://caddyserver.com) is the shortest path to TLS + basic auth (generate the hash with `caddy hash-password`):
 
 ```caddyfile
-devagent.yourdomain.com {
+sde-deepagent.yourdomain.com {
     basic_auth {
         admin $2a$14$...hashed-password...
     }
@@ -127,7 +127,7 @@ SSE streaming works through Caddy/nginx out of the box (the API sets `X-Accel-Bu
 <summary><b>Alternative: bare-metal with systemd (no Docker)</b></summary>
 
 ```bash
-# as a dedicated user, in /opt/devagent
+# as a dedicated user, in /opt/sde-deepagent
 curl -LsSf https://astral.sh/uv/install.sh | sh
 uv sync --no-dev
 curl -fsSL https://supermemory.ai/install | bash   # installs supermemory-server
@@ -141,28 +141,28 @@ Description=Supermemory local server
 After=network-online.target
 
 [Service]
-User=devagent
-WorkingDirectory=/opt/devagent
-EnvironmentFile=/opt/devagent/.env
-Environment=SUPERMEMORY_DATA_DIR=/opt/devagent/data/supermemory
-ExecStart=/home/devagent/.local/bin/supermemory-server
+User=sde-deepagent
+WorkingDirectory=/opt/sde-deepagent
+EnvironmentFile=/opt/sde-deepagent/.env
+Environment=SUPERMEMORY_DATA_DIR=/opt/sde-deepagent/data/supermemory
+ExecStart=/home/sde-deepagent/.local/bin/supermemory-server
 Restart=on-failure
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-`/etc/systemd/system/devagent.service`:
+`/etc/systemd/system/sde-deepagent.service`:
 
 ```ini
 [Unit]
-Description=devagent
+Description=sde-deepagent
 After=network-online.target supermemory.service
 
 [Service]
-User=devagent
-WorkingDirectory=/opt/devagent
-ExecStart=/home/devagent/.local/bin/uv run --no-sync devagent
+User=sde-deepagent
+WorkingDirectory=/opt/sde-deepagent
+ExecStart=/home/sde-deepagent/.local/bin/uv run --no-sync sde-deepagent
 Restart=on-failure
 
 [Install]
@@ -170,10 +170,10 @@ WantedBy=multi-user.target
 ```
 
 ```bash
-systemctl enable --now supermemory devagent
+systemctl enable --now supermemory sde-deepagent
 ```
 
-devagent reads `.env` from its working directory; `git` must be on the PATH.
+sde-deepagent reads `.env` from its working directory; `git` must be on the PATH.
 </details>
 
 ## Configuration
@@ -280,7 +280,7 @@ GET/POST/DELETE /api/resources                            POST /webhooks/linear
 ```bash
 uv sync
 uv run pytest        # 105 tests
-uv run devagent
+uv run sde-deepagent
 ```
 
-Layout: `src/devagent/` — `agent_factory.py` (deepagents wiring) · `runner.py` (task pipeline) · `worker.py` (queue + budgets) · `gitops.py` (git/PR) · `memory.py` (Supermemory client) · `chat.py` (task-history assistant) · `pricing.py` (cost tracking) · `intake/` (telegram/slack/linear) · `server.py` (API + SSE) · `ui/` (static SPA, no build step).
+Layout: `src/sde-deepagent/` — `agent_factory.py` (deepagents wiring) · `runner.py` (task pipeline) · `worker.py` (queue + budgets) · `gitops.py` (git/PR) · `memory.py` (Supermemory client) · `chat.py` (task-history assistant) · `pricing.py` (cost tracking) · `intake/` (telegram/slack/linear) · `server.py` (API + SSE) · `ui/` (static SPA, no build step).

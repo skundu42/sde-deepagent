@@ -7,14 +7,14 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from devagent.bus import EventBus
-from devagent.config import AgentsConfig, ConfigStore, RepoConfig, SubagentConfig
-from devagent.context import build_repo_map
-from devagent.db import Database
-from devagent.gitops import git, prepare_workspace, run_cmd
-from devagent.llm import build_model
-from devagent.runner import TaskRunner
-from devagent.settings import get_settings
+from sde_deepagent.bus import EventBus
+from sde_deepagent.config import AgentsConfig, ConfigStore, RepoConfig, SubagentConfig
+from sde_deepagent.context import build_repo_map
+from sde_deepagent.db import Database
+from sde_deepagent.gitops import git, prepare_workspace, run_cmd
+from sde_deepagent.llm import build_model
+from sde_deepagent.runner import TaskRunner
+from sde_deepagent.settings import get_settings
 
 
 async def make_origin(path, files=None):
@@ -71,7 +71,7 @@ async def test_prepare_workspace_existing_branch(temp_env, tmp_path):
 
 
 async def test_revision_missing_branch_fails(temp_env, tmp_path):
-    from devagent.gitops import GitError
+    from sde_deepagent.gitops import GitError
 
     origin = tmp_path / "o3"
     await make_origin(origin)
@@ -134,7 +134,7 @@ async def test_request_approval_no_changes_completes(runner_stack, tmp_path):
 
 
 async def test_approve_endpoint_ships(temp_env, tmp_path, monkeypatch):
-    from devagent.server import create_app
+    from sde_deepagent.server import create_app
 
     origin = tmp_path / "o6"
     await make_origin(origin)
@@ -152,7 +152,7 @@ async def test_approve_endpoint_ships(temp_env, tmp_path, monkeypatch):
                 task = await db.create_task("held work", "d", repo="demo")
                 ws = await prepare_workspace(task.id, task.title, repo, settings)
                 (ws.path / "shipped.py").write_text("ok = True\n")
-                from devagent.gitops import commit_all
+                from sde_deepagent.gitops import commit_all
                 await commit_all(ws, "the work")
                 await db.update_task(task.id, status="awaiting_approval",
                                      branch=ws.branch)
@@ -197,7 +197,7 @@ def test_build_model_effort_per_provider(monkeypatch):
 
 
 def test_validate_models_checks_effort():
-    from devagent.agent_factory import validate_models
+    from sde_deepagent.agent_factory import validate_models
 
     cfg = AgentsConfig(
         orchestrator_model="openai:gpt-5.4", orchestrator_effort="ultra",
