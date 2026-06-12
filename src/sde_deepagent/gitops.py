@@ -14,7 +14,7 @@ from pathlib import Path
 
 import httpx
 
-from .config import RepoConfig
+from .config import RepoConfig, repo_slug
 from .settings import Settings
 
 
@@ -117,6 +117,10 @@ def _write_junk_excludes(repo_dir: Path) -> None:
             f.write("\n".join(JUNK_EXCLUDES) + "\n")
 
 
+def workspace_root_for(settings: Settings, repo_name: str, task_id: str) -> Path:
+    return settings.workspaces_dir / repo_slug(repo_name) / task_id
+
+
 async def prepare_workspace(
     task_id: str, title: str, repo: RepoConfig, settings: Settings,
     existing_branch: str | None = None,
@@ -125,8 +129,12 @@ async def prepare_workspace(
 
     Normal tasks get a new work branch; revision tasks pass `existing_branch`
     (a previously pushed agent branch) and continue on it, so pushes update
-    the same PR."""
-    ws_root = settings.workspaces_dir / task_id
+    the same PR.
+
+    Layout is workspaces/<repo_slug>/<task_id>/repo: grouping by repo lets the
+    repo's (reusable) sandbox container bind-mount one stable parent directory
+    that covers every task workspace for that repo — and only that repo."""
+    ws_root = workspace_root_for(settings, repo.name, task_id)
     if ws_root.exists():
         shutil.rmtree(ws_root)
     ws_root.mkdir(parents=True)
@@ -266,8 +274,18 @@ def prune_workspaces(settings: Settings, keep: int | None = None,
     root = settings.workspaces_dir
     if not root.exists():
         return []
-    dirs = sorted((d for d in root.iterdir() if d.is_dir()),
-                  key=lambda d: d.stat().st_mtime, reverse=True)
+    # layout: <root>/<repo_slug>/<task_id>. Task dirs are pruned; the repo-level
+    # dirs stay even when empty — a repo's sandbox container bind-mounts its
+    # dir, and deleting/recreating a mount source leaves the container watching
+    # a dead inode. Top-level dirs from the old flat layout (they contain
+    # repo/.git directly) are legacy task workspaces and removed wholesale.
+    task_dirs: list[Path] = []
+    for top in (d for d in root.iterdir() if d.is_dir()):
+        if (top / "repo" / ".git").exists():  # pre-per-repo-layout workspace
+            task_dirs.append(top)
+        else:
+            task_dirs.extend(d for d in top.iterdir() if d.is_dir())
+    dirs = sorted(task_dirs, key=lambda d: d.stat().st_mtime, reverse=True)
     deleted = []
     for d in dirs[max(keep, 0):]:
         if protect and d.name in protect:

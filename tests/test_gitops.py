@@ -67,14 +67,37 @@ def test_prune_workspaces(temp_env):
     import os
     import time
     for i in range(5):
-        d = root / f"task{i}"
+        d = root / "demo" / f"task{i}"  # layout: <root>/<repo_slug>/<task_id>
         d.mkdir(parents=True)
         ts = time.time() - (5 - i) * 60  # task0 oldest ... task4 newest
         os.utime(d, (ts, ts))
     deleted = prune_workspaces(settings, keep=2)
     assert sorted(deleted) == ["task0", "task1", "task2"]
-    assert {d.name for d in root.iterdir()} == {"task3", "task4"}
+    assert {d.name for d in (root / "demo").iterdir()} == {"task3", "task4"}
+    # the repo-level dir survives even if emptied: the repo's sandbox
+    # container bind-mounts it
+    assert (root / "demo").exists()
     assert prune_workspaces(settings, keep=2) == []  # idempotent
+
+
+def test_prune_workspaces_protect_and_legacy(temp_env):
+    settings = get_settings()
+    root = settings.workspaces_dir
+    import os
+    import time
+    now = time.time()
+    # old flat-layout workspace (pre per-repo dirs): <root>/<task>/repo/.git
+    legacy = root / "oldtask" / "repo" / ".git"
+    legacy.mkdir(parents=True)
+    os.utime(root / "oldtask", (now - 7200, now - 7200))
+    for i, name in enumerate(["keepme", "newest"]):
+        d = root / "demo" / name
+        d.mkdir(parents=True)
+        os.utime(d, (now - (2 - i) * 60, now - (2 - i) * 60))
+    deleted = prune_workspaces(settings, keep=1, protect={"keepme"})
+    assert sorted(deleted) == ["oldtask"]  # legacy removed wholesale
+    assert (root / "demo" / "keepme").exists()  # protected despite being old
+    assert (root / "demo" / "newest").exists()
 
 
 def test_branch_name():

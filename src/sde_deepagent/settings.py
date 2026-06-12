@@ -71,12 +71,20 @@ class Settings(BaseSettings):
     require_approval: bool = False  # global default: hold work for approval before push/PR
     workspace_retention: int = 10  # keep N most recent task workspaces on disk
 
-    # --- sandboxing (per-task container isolation) ---
-    sandbox_default: bool = False     # default for repos that don't set `sandbox`
-    sandbox_image: str = "python:3.12-slim"
-    sandbox_network: str = "none"     # none | bridge — egress policy inside the sandbox
+    # --- sandboxing (one container per repo, reused across tasks) ---
+    # Zero-config by default: every repo's tasks run in that repo's container
+    # (needs Docker; SANDBOX_DEFAULT=false to run on the host instead), and the
+    # agent installs whatever toolchain/dependencies the repo needs in there —
+    # which requires egress, hence network=bridge. Set SANDBOX_NETWORK=none for
+    # airtight egress at the cost of self-bootstrapping environments.
+    sandbox_default: bool = True      # default for repos that don't set `sandbox`
+    # generic Debian build image (git/gcc/make/curl, no language runtimes) —
+    # setup/agent installs the toolchain once, then the container is reused
+    sandbox_image: str = "buildpack-deps:bookworm"
+    sandbox_network: str = "bridge"   # bridge | none — egress policy inside the sandbox
     sandbox_memory: str = "2g"
     sandbox_cpus: str = "2"
+    sandbox_idle_hours: float = 24.0  # remove a repo's container idle this long
 
     # --- LLM cost budgets (USD; 0 = unlimited) ---
     task_budget_usd: float = 0.0   # default per-task cap (overridable per task)
@@ -89,6 +97,11 @@ class Settings(BaseSettings):
     @property
     def workspaces_dir(self) -> Path:
         return self.data_dir / "workspaces"
+
+    @property
+    def sandbox_state_path(self) -> Path:
+        """Last-use timestamps for sandbox containers (drives the idle reaper)."""
+        return self.data_dir / "sandbox-usage.json"
 
     def telegram_allowed_chat_ids(self) -> set[int]:
         return {int(c) for c in self.telegram_allowed_chats.split(",") if c.strip()}

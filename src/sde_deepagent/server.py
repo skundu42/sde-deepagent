@@ -106,6 +106,11 @@ async def lifespan(app: FastAPI):
         review_intake.start()
     worker.start()
 
+    from .sandbox import SandboxReaper
+    reaper = SandboxReaper(settings.sandbox_state_path,
+                           ttl_seconds=settings.sandbox_idle_hours * 3600)
+    reaper.start()
+
     app.state.settings = settings
     app.state.db = db
     app.state.bus = bus
@@ -122,6 +127,7 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         await worker.stop()
+        await reaper.stop()
         for intake in intakes:
             await intake.stop()
         if review_intake:
@@ -241,13 +247,19 @@ def create_app() -> FastAPI:
     async def _ship_approved(request: Request, task) -> str | None:
         """Push the held branch and open the PR (degrading to branch-only like
         the normal finalize path). Returns the PR URL if one was opened."""
-        from .gitops import GitError, Workspace, create_pull_request, push_branch
+        from .gitops import (
+            GitError,
+            Workspace,
+            create_pull_request,
+            push_branch,
+            workspace_root_for,
+        )
 
         s = request.app.state.settings
         repo = request.app.state.cfg.repos().get(task.repo)
         if not repo:
             raise HTTPException(409, f"repo '{task.repo}' is no longer registered")
-        path = s.workspaces_dir / task.id / "repo"
+        path = workspace_root_for(s, task.repo, task.id) / "repo"
         if not path.exists():
             raise HTTPException(409, "workspace no longer on disk — re-run the task")
         ws = Workspace(task_id=task.id, repo=repo, path=path, branch=task.branch)

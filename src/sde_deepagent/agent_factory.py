@@ -26,8 +26,11 @@ from .mcp_tools import load_mcp_tools
 from .memory import GLOBAL_TAG, Memory, memory_from_settings, repo_tag
 from .prompts import (
     DEFAULT_SUBAGENT_PROMPTS,
+    HOST_ENV_PROMPT,
     MEMORY_PROMPT,
     ORCHESTRATOR_PROMPT,
+    SANDBOX_ENV_PROMPT,
+    SANDBOX_ENV_PROMPT_OFFLINE,
     SHIP_APPROVAL,
     SHIP_NORMAL,
 )
@@ -147,11 +150,14 @@ async def build_agent(
     model_override: str | None = None,
     on_event: Callable[[str, dict], Awaitable[None]] | None = None,
     sandbox_container: str | None = None,
+    sandbox_workdir: str | None = None,
+    sandbox_network: str | None = None,
     drain_messages: Callable[[], list[str]] | None = None,
 ) -> BuiltAgent:
     if sandbox_container:
         from .sandbox import DockerShellBackend
         backend = DockerShellBackend(ws.path, sandbox_container,
+                                     workdir=sandbox_workdir or "/workspaces",
                                      timeout=600, max_output_bytes=60000)
     else:
         backend = LocalShellBackend(
@@ -197,8 +203,15 @@ async def build_agent(
             spec["model"] = build_model(sub.model, effort=sub.effort)
         subagents.append(spec)
 
+    if sandbox_container:
+        exec_environment = (SANDBOX_ENV_PROMPT if sandbox_network == "bridge"
+                            else SANDBOX_ENV_PROMPT_OFFLINE)
+    else:
+        exec_environment = HOST_ENV_PROMPT
+
     repo = ws.repo
     system_prompt = (agents_cfg.orchestrator_prompt or ORCHESTRATOR_PROMPT).format(
+        exec_environment=exec_environment,
         branch=ws.branch,
         repo_name=repo.name,
         repo_description=repo.description or "(no description registered)",

@@ -346,29 +346,47 @@ class TaskRunner:
                             {"text": f"workspace ready on branch {ws.branch}"
                                      + (f" (revising task {parent.id})" if parent else "")})
 
-            # per-task container sandbox (isolates the agent's shell + egress)
+            # per-repo container sandbox (isolates the agent's shell + egress);
+            # reused across tasks so toolchains/dependency caches survive
             sandbox_container: str | None = None
+            sandbox_workdir: str | None = None
+            sandbox_network: str | None = None
             if self._resolve_sandbox(repo):
                 from . import sandbox as sbx
                 if not sbx.docker_available():
                     raise GitError(
-                        "repo requests sandboxing but Docker is unavailable — refusing "
-                        "to run untrusted commands on the host. Install/start Docker or "
-                        "set sandbox: false for this repo.")
+                        "tasks run sandboxed but Docker is unavailable — refusing "
+                        "to run untrusted commands on the host. Install/start Docker, "
+                        "or opt out (SANDBOX_DEFAULT=false, or sandbox: false on "
+                        "this repo) to run on the host.")
                 image = repo.sandbox_image or self.settings.sandbox_image
                 network = repo.sandbox_network or self.settings.sandbox_network
-                sandbox_container = sbx.start_container(
-                    task.id, str(ws.path), image=image, network=network,
-                    memory=self.settings.sandbox_memory, cpus=self.settings.sandbox_cpus)
+                if network not in ("none", "bridge"):
+                    network = "none"
+                sandbox_network = network
+                mount_dir = ws.path.parent.parent  # workspaces/<repo_slug>
+                # to_thread: creation may pull the image — don't block the loop
+                sandbox_container, created = await asyncio.to_thread(
+                    sbx.ensure_container, repo.name, str(mount_dir),
+                    image=image, network=network,
+                    memory=self.settings.sandbox_memory,
+                    cpus=self.settings.sandbox_cpus,
+                    probe_subdir=f"{task.id}/repo")
+                sandbox_workdir = f"/workspaces/{task.id}/repo"
+                sbx.mark_used(sandbox_container, self.settings.sandbox_state_path)
                 sandboxed = True
                 await self.emit(task.id, "log", {
-                    "text": f"sandbox container started (image={image}, network={network})"})
+                    "text": f"sandbox container "
+                            f"{'started' if created else 'reused'} "
+                            f"(image={image}, network={network})"})
 
             if repo.setup:
                 await self.emit(task.id, "log", {"text": f"running setup: {repo.setup}"})
                 if sandbox_container:
                     from .sandbox import exec_in_container
-                    res = exec_in_container(sandbox_container, repo.setup, timeout=900)
+                    res = await asyncio.to_thread(
+                        exec_in_container, sandbox_container, repo.setup,
+                        timeout=900, workdir=sandbox_workdir)
                     code, out = res.exit_code, res.output
                 else:
                     from .gitops import run_cmd
@@ -402,6 +420,8 @@ class TaskRunner:
                 ws, task_description, agents_cfg, self.settings,
                 model_override=task.model, on_event=on_tool_event,
                 sandbox_container=sandbox_container,
+                sandbox_workdir=sandbox_workdir,
+                sandbox_network=sandbox_network,
                 drain_messages=lambda: self._drain_mailbox(task.id))
             await self.emit(task.id, "log", {
                 "text": f"agent started (orchestrator={task.model or agents_cfg.orchestrator_model}, "
@@ -464,11 +484,14 @@ class TaskRunner:
         finally:
             self.mailboxes.pop(task.id, None)
             if sandboxed:
+                # the container stays up for reuse; restamp its idle clock so
+                # the reaper counts the 24h TTL from this task's end
                 try:
                     from . import sandbox as sbx
-                    sbx.stop_container(task.id)
+                    sbx.mark_used(sandbox_container,
+                                  self.settings.sandbox_state_path)
                 except Exception:  # noqa: BLE001
-                    logger.exception("failed to stop sandbox for %s", task.id)
+                    logger.exception("failed to mark sandbox use for %s", task.id)
             try:
                 deleted = prune_workspaces(self.settings,
                                            protect=await self._protected_workspaces())

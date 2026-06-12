@@ -4,12 +4,20 @@ API and the next task picks up the change."""
 
 from __future__ import annotations
 
+import re
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+
+def repo_slug(name: str) -> str:
+    """Filesystem- and Docker-name-safe slug for a repo name (workspace
+    directories and sandbox containers are keyed by it)."""
+    s = re.sub(r"[^a-zA-Z0-9_.-]+", "-", name.strip()).strip("-.")
+    return (s or "repo").lower()[:50]
 
 DEFAULT_AGENTS_YAML = """\
 # Model for every agent role. Format: "<provider>:<model>" where provider is

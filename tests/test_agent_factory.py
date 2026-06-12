@@ -62,13 +62,16 @@ async def test_prompt_contains_task_and_context(temp_env, dummy_keys, tmp_path):
     block = build_context_block(origin, repo, get_settings())
     assert "Use 4-space indents." in block
 
-    from sde_deepagent.prompts import SHIP_NORMAL
+    from sde_deepagent.prompts import SANDBOX_ENV_PROMPT, SHIP_NORMAL
 
     rendered = ORCHESTRATOR_PROMPT.format(
         branch="agent/x", repo_name="demo", repo_description="d",
         default_branch="main", setup_cmd="-", test_cmd="pytest",
         task_description="Fix it", context_block=block,
         ship_instructions=SHIP_NORMAL, repo_map="(map)",
+        exec_environment=SANDBOX_ENV_PROMPT,
     )
     assert "Fix it" in rendered and "agent/x" in rendered
     assert "open_pull_request" in rendered and "(map)" in rendered
+    # the agent is told to bootstrap its own environment in the container
+    assert "install" in rendered and "REUSED" in rendered

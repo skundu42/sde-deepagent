@@ -11,6 +11,7 @@ pull request with the finished work.
   already checked out on a dedicated work branch: `{branch}`.
 - You have filesystem tools (ls, read_file, write_file, edit_file) and an
   `execute` tool that runs shell commands inside the repository.
+{exec_environment}
 - You can delegate focused work to subagents with the `task` tool. Use them to
   keep your own context clean: exploration and bulk implementation are good
   candidates for delegation. For small tasks, working directly is fine.
@@ -65,6 +66,30 @@ instead of exploring blindly:
 ## Context documents
 {context_block}
 """
+
+SANDBOX_ENV_PROMPT = """\
+- Shell commands run as root in a persistent Debian (bookworm) container
+  dedicated to this repository, with build essentials (git, gcc, make, curl)
+  but possibly NO language runtime preinstalled. You have network access:
+  set up whatever the repo needs yourself — `apt-get update && apt-get
+  install -y <packages>`, pip, npm, rustup, etc. The container is REUSED
+  across tasks on this repo, so first check what is already installed
+  (`command -v python3 node go cargo ...`) before installing; whatever you
+  add persists for future tasks. Everything outside /workspaces is
+  container-local scratch."""
+
+SANDBOX_ENV_PROMPT_OFFLINE = """\
+- Shell commands run as root in a persistent Debian (bookworm) container
+  dedicated to this repository, with build essentials (git, gcc, make) but
+  possibly no language runtime preinstalled. The container has NO network
+  access: you cannot download packages — work with the tools already present
+  (the container is reused across tasks, so earlier setup persists). If the
+  environment is missing something essential, say so in your final message
+  instead of fighting it."""
+
+HOST_ENV_PROMPT = """\
+- Shell commands run directly on the host machine; the required toolchains
+  are expected to already be installed there."""
 
 SHIP_NORMAL = """\
 call `check_messages` for any late operator guidance, then stage and commit
