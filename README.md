@@ -1,241 +1,286 @@
 # devagent
 
-A self-hostable software developer agent system built on
-[LangChain deepagents](https://docs.langchain.com/oss/python/deepagents/overview).
+**A self-hostable software developer agent system.** Assign it a task — from the web UI, Telegram, Slack, or Linear — and it clones the right codebase, plans, implements the change, runs the tests, and opens a pull request.
 
-Assign it a task — from the **web UI, Telegram, Slack, or Linear** — and it
-clones the right codebase, plans, implements the change, runs the tests, and
-opens a pull request.
+Built on [LangChain deepagents](https://docs.langchain.com/oss/python/deepagents/overview). The only required external dependency is a model API key (Anthropic, Google Gemini, and/or OpenAI); everything else — queue, storage, UI, event streaming, long-term memory — runs on your own infrastructure.
+
+![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue) ![self--hosted](https://img.shields.io/badge/deployment-self--hosted-green) ![tests](https://img.shields.io/badge/tests-105%20passing-brightgreen)
+
+---
+
+## Features
+
+- **Orchestrator + specialist subagents** (explorer / coder / tester / reviewer) — model *and* reasoning effort configurable per role, providers freely mixed
+- **Full task pipeline**: isolated git workspace → plan → implement → test until green → diff review → commit → push → GitHub PR
+- **Multi-channel intake**: web UI, Telegram (long-polling), Slack (Socket Mode), Linear (label polling + webhook) — no public URL required; results are reported back to the originating channel
+- **Long-term memory** (self-hosted [Supermemory](https://supermemory.ai/docs/self-hosting/overview)): agents recall conventions and gotchas from past tasks and record new learnings; every task outcome is stored per codebase
+- **Company context**: per-repo doc globs, repo convention files (`AGENTS.md`, `CLAUDE.md`, …), a global `context/` folder, and a **Resources** page that ingests any URL or text into memory (optional Firecrawl for JS-rendered pages)
+- **Cost control**: per-message cost tracking, per-task budgets that abort runaway runs, a daily budget that pauses the queue, live spend in the UI
+- **Human oversight**: optional approval gate (nothing is pushed until an operator reviews the diff), one-click PR revisions that reuse the branch, full live trace of every agent step
+- **Chat**: ask an assistant about any past or running task — grounded in the actual task records, traces, and memory
+- **Observability**: every message, tool call, shell command, and token persisted in SQLite and streamed live over SSE
+
+## Architecture
 
 ```
  Telegram ─┐
- Slack ────┤                ┌─ orchestrator (deep agent)
- Linear ───┼─▶ task queue ─▶│    ├─ explorer   (read-only scout)
- Web UI ───┘       │        │    ├─ coder      (implementation)
-                   │        │    ├─ tester     (run/fix/write tests)
-                   ▼        │    └─ reviewer   (final diff review)
-              SQLite + SSE  └─▶ git branch ─▶ tests ─▶ GitHub PR
+ Slack ────┤                 ┌─ orchestrator (deep agent)
+ Linear ───┼─▶ task queue ─▶ │    ├─ explorer   (read-only scout)
+ Web UI ───┘       │         │    ├─ coder      (implementation)
+                   │         │    ├─ tester     (run/fix/write tests)
+                   ▼         │    └─ reviewer   (final diff review)
+            SQLite + SSE     └─▶ git branch ─▶ tests ─▶ GitHub PR
+                   ▲                  │
+            Supermemory ◀── learnings ┘   (self-hosted long-term memory)
 ```
 
-The **only external dependency is your model API key(s)** (Anthropic, Google
-Gemini, and/or OpenAI). Everything else — queue, storage, UI, event streaming — runs in
-one self-hosted process. A `GITHUB_TOKEN` is needed only if you want it to push
-branches and open PRs on GitHub; chat/issue-tracker keys only if you use those
-intakes.
+Single process: FastAPI server, asyncio worker pool, SQLite persistence, static UI. Supermemory runs as a sidecar (compose service or local binary).
 
-## Quick start
+## Quick start (local)
 
 ```bash
+git clone https://github.com/skundu42/sde-deepagent.git && cd sde-deepagent
 cp .env.example .env        # add ANTHROPIC_API_KEY / GOOGLE_API_KEY / OPENAI_API_KEY
 uv sync
 uv run devagent             # → http://localhost:8321
 ```
 
-or with Docker:
+Then in the UI: **Codebases** → register a repo (git URL or local path, test command) → **New task** → watch the live agent trace; the PR link appears when it ships.
+
+## Deploying on a server
+
+The recommended production setup is Docker Compose behind a TLS reverse proxy. A 2 vCPU / 4 GB VM is sufficient (no GPU — local embeddings run quantized on CPU; all LLM inference is API-side).
+
+### 1. Provision
 
 ```bash
+# Ubuntu/Debian: install Docker Engine + compose plugin
+curl -fsSL https://get.docker.com | sh
+
+git clone https://github.com/skundu42/sde-deepagent.git /opt/devagent
+cd /opt/devagent
 cp .env.example .env
-docker compose up --build   # → http://localhost:8321
 ```
 
-Then, in the UI:
+Edit `.env` with at minimum one model key, and a `GITHUB_TOKEN` so the agent can push branches and open PRs (classic PAT with `repo` scope, or a fine-grained PAT with *Contents* and *Pull requests* read/write):
 
-1. **Codebases** → register a repo (git URL or local path, test command,
-   context docs).
-2. **New task** → describe the work and queue it.
-3. Watch the live agent trace; the PR link appears when it ships.
+```bash
+OPENAI_API_KEY=sk-...        # and/or ANTHROPIC_API_KEY / GOOGLE_API_KEY
+GITHUB_TOKEN=ghp_...
+DAILY_BUDGET_USD=50          # strongly recommended on a server
+REQUIRE_APPROVAL=true        # recommended until you trust it unattended
+```
 
-## Giving the agent your company's context
+### 2. Lock the ports to localhost
 
-Three layers, all picked up automatically:
+The UI and API have **no built-in authentication** — they must only be reachable through your reverse proxy. Create a `docker-compose.override.yml`:
 
-| Layer | How |
+```yaml
+services:
+  devagent:
+    ports: !override
+      - "127.0.0.1:8321:8321"
+  supermemory:
+    ports: !override
+      - "127.0.0.1:6767:6767"
+```
+
+### 3. Start and wire up memory
+
+```bash
+docker compose up -d --build
+
+# first boot only: copy supermemory's generated API key into .env
+docker compose logs supermemory | grep "api key"
+echo 'SUPERMEMORY_API_KEY=sm_...' >> .env       # paste the printed key
+docker compose up -d                            # recreate devagent with the key
+```
+
+`SUPERMEMORY_BASE_URL` is already pointed at the sidecar by the compose file. Verify: `curl -s localhost:8321/api/health` should show `"ok": true` and `"memory": true`.
+
+### 4. Reverse proxy with TLS + auth
+
+Any proxy works; [Caddy](https://caddyserver.com) is the shortest path to TLS + basic auth (generate the hash with `caddy hash-password`):
+
+```caddyfile
+devagent.yourdomain.com {
+    basic_auth {
+        admin $2a$14$...hashed-password...
+    }
+    reverse_proxy 127.0.0.1:8321
+}
+```
+
+SSE streaming works through Caddy/nginx out of the box (the API sets `X-Accel-Buffering: no`). If you use the Linear webhook, set `LINEAR_WEBHOOK_SECRET` and expose only `/webhooks/linear` unauthenticated. Telegram and Slack intakes poll outbound — they need no inbound route at all.
+
+### 5. Operations
+
+| Concern | How |
 |---|---|
-| Repo conventions | `AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING.md` in the repo are always read |
-| Repo docs | list globs under `context:` for each repo in `config/repos.yaml` / the UI |
-| Company-wide docs | drop files into the `context/` directory — mounted into every task workspace at `_context/` |
+| Update | `git pull && docker compose up -d --build` |
+| Logs | `docker compose logs -f devagent` |
+| Backup | `data` volumes (`devagent-data`: task DB + workspaces, `supermemory-data`: memories) plus `.env` and `config/` on the host |
+| Budget guardrail | `DAILY_BUDGET_USD` pauses the queue at the cap (UTC day); per-task caps via `TASK_BUDGET_USD` or the new-task form |
+| Crash recovery | tasks interrupted by a restart are marked failed (never silently lost); `awaiting_approval` work survives restarts |
 
-## Configuring agents & models
+<details>
+<summary><b>Alternative: bare-metal with systemd (no Docker)</b></summary>
 
-`config/agents.yaml` (also editable in the UI under **Agents**) sets the model
-for the orchestrator and each subagent independently:
+```bash
+# as a dedicated user, in /opt/devagent
+curl -LsSf https://astral.sh/uv/install.sh | sh
+uv sync --no-dev
+curl -fsSL https://supermemory.ai/install | bash   # installs supermemory-server
+```
+
+`/etc/systemd/system/supermemory.service`:
+
+```ini
+[Unit]
+Description=Supermemory local server
+After=network-online.target
+
+[Service]
+User=devagent
+WorkingDirectory=/opt/devagent
+EnvironmentFile=/opt/devagent/.env
+Environment=SUPERMEMORY_DATA_DIR=/opt/devagent/data/supermemory
+ExecStart=/home/devagent/.local/bin/supermemory-server
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
+
+`/etc/systemd/system/devagent.service`:
+
+```ini
+[Unit]
+Description=devagent
+After=network-online.target supermemory.service
+
+[Service]
+User=devagent
+WorkingDirectory=/opt/devagent
+ExecStart=/home/devagent/.local/bin/uv run --no-sync devagent
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+systemctl enable --now supermemory devagent
+```
+
+devagent reads `.env` from its working directory; `git` must be on the PATH.
+</details>
+
+## Configuration
+
+All runtime settings come from `.env` (see [`.env.example`](.env.example) for the full annotated list):
+
+| Variable | Purpose |
+|---|---|
+| `ANTHROPIC_API_KEY` / `GOOGLE_API_KEY` / `OPENAI_API_KEY` | model providers (≥ 1 required) |
+| `GITHUB_TOKEN`, `GITHUB_API_URL` | push branches + open PRs (GitHub / GHE) |
+| `SUPERMEMORY_BASE_URL`, `SUPERMEMORY_API_KEY` | long-term memory (optional) |
+| `FIRECRAWL_API_URL` / `FIRECRAWL_API_KEY` | JS-rendering scraper for the Resources page (optional) |
+| `TELEGRAM_BOT_TOKEN`, `SLACK_BOT_TOKEN` + `SLACK_APP_TOKEN`, `LINEAR_API_KEY` | intake channels (each optional) |
+| `TASK_BUDGET_USD`, `DAILY_BUDGET_USD` | cost guardrails (0 = unlimited) |
+| `REQUIRE_APPROVAL` | hold every task for human review before push/PR |
+| `MAX_CONCURRENT_TASKS`, `TASK_TIMEOUT_SECONDS`, `WORKSPACE_RETENTION` | runtime tuning |
+
+### Agents & models — `config/agents.yaml` (or UI → Agents)
 
 ```yaml
 orchestrator:
-  model: anthropic:claude-sonnet-4-6
+  model: openai:gpt-5.4
+  effort: medium            # low | medium | high — reasoning depth per role
 subagents:
   explorer:
     model: anthropic:claude-haiku-4-5-20251001
   coder:
-    model: google_genai:gemini-2.5-pro      # mix providers freely
+    model: google_genai:gemini-2.5-pro     # mix providers freely
   reviewer:
-    model: openai:gpt-5.4
+    model: openai:o4-mini
 ```
 
-Supported providers: `anthropic:*` (Claude), `google_genai:*` (Gemini) and
-`openai:*` (GPT / o-series).
-Subagent `description` (when the orchestrator delegates to it) and
-`system_prompt` are also configurable. Per-task model overrides are available
-in the new-task form.
+Providers: `anthropic:*`, `google_genai:*`, `openai:*`. Effort maps to each provider's native knob (OpenAI `reasoning_effort`, Anthropic `effort`, Gemini `thinking_level`). Subagent descriptions and system prompts are also configurable, as are extra **MCP servers** (`mcp_servers:`) whose tools are handed to the orchestrator, and **pricing overrides** (`pricing:`) when provider prices drift.
 
-Extra tools can be wired in from any **MCP server** under `mcp_servers:` in the
-same file (stdio or HTTP transports) — they're handed to the orchestrator.
+### Codebases — `config/repos.yaml` (or UI → Codebases)
 
-## Long-term memory (Supermemory)
-
-Agents get persistent, cross-task memory backed by a
-[self-hosted Supermemory](https://supermemory.ai/docs/self-hosting/overview)
-instance — a single local binary with built-in embeddings, no extra database.
-
-```bash
-npx supermemory local        # starts on :6767 and prints an sm_ API key
-# (with Docker, the compose file already runs it: docker compose logs supermemory)
+```yaml
+repos:
+  backend:
+    url: git@github.com:acme/backend.git
+    default_branch: main
+    description: "Python FastAPI monolith serving the public API"
+    setup: "uv sync"
+    test: "uv run pytest -x -q"
+    context:
+      - docs/architecture.md
 ```
 
-Put both values in `.env`:
+The `description` powers automatic task→repo routing; `test` is how the agent verifies its work.
 
-```bash
-SUPERMEMORY_BASE_URL=http://localhost:6767
-SUPERMEMORY_API_KEY=sm_...
-```
+## Giving the agent your company's context
 
-What it does once enabled:
+| Layer | How |
+|---|---|
+| Repo conventions | `AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING.md` in the repo are always read |
+| Repo docs | globs under `context:` per repo |
+| Company-wide docs | files in the `context/` directory — mounted into every workspace |
+| **Resources page** (UI → 06) | paste any URL or text → fetched, extracted, and indexed into long-term memory, scoped globally or per codebase |
 
-- **`search_memory`** — the orchestrator *and all subagents* can recall
-  conventions, gotchas, architecture notes and decisions recorded by previous
-  tasks before exploring from scratch.
-- **`save_memory`** — the orchestrator records durable learnings before
-  opening a PR (scoped per codebase, or `global` for org-wide facts).
-- **Automatic outcomes** — every completed task's summary + PR link is stored
-  automatically, so the agent always knows what was recently changed and why.
-
-Memories are partitioned per codebase (`devagent_repo_<name>`) plus a shared
-`devagent_global` container. If the memory server is down, agents degrade
-gracefully to working without it. Without the `SUPERMEMORY_*` vars the feature
-is simply off (sidebar shows `memory off`).
-
-Notes: supermemory itself needs one LLM credential to boot (it reuses your
-`ANTHROPIC_API_KEY`/`GOOGLE_API_KEY`/`OPENAI_*` from the environment, or
-`~/.supermemory/env`). Embeddings run locally, and devagent searches in
-`hybrid` mode — so recall works immediately and even fully offline; the LLM
-only enriches memory extraction.
-
-### Resources page — feed it your company's links & docs
-
-The **Resources** page (UI → 06) ingests any URL or pasted text into long-term
-memory: documentation sites, runbooks, conventions, onboarding notes — scoped
-either globally or to one codebase. Agents and the chat assistant recall this
-content automatically via `search_memory`.
-
-URL fetching has two tiers: with **Firecrawl** configured (self-hosted from
-[firecrawl/firecrawl](https://github.com/firecrawl/firecrawl), or their cloud
-API via `FIRECRAWL_API_KEY`), pages are JS-rendered and converted to clean
-markdown — SPAs and modern docs portals extract properly. Without it, devagent's
-built-in fetcher handles static pages. Firecrawl failures fall back to the
-built-in fetcher automatically.
-
-```bash
-FIRECRAWL_API_URL=http://localhost:3002   # self-hosted, no key needed
-# or
-FIRECRAWL_API_KEY=fc-...                  # cloud (api.firecrawl.dev)
-```
-
-## Task intake
-
-| Channel | Setup | Usage |
-|---|---|---|
-| Web UI | none | **New task** form |
-| Telegram | `TELEGRAM_BOT_TOKEN` (via @BotFather); long-polling, no public URL | message the bot: `[backend] fix the login bug` |
-| Slack | `SLACK_BOT_TOKEN` + `SLACK_APP_TOKEN` (Socket Mode, no public URL) | @mention the bot or DM it |
-| Linear | `LINEAR_API_KEY`; label issues `agent` (configurable) | polled every 30s; optional instant webhook at `/webhooks/linear` |
-
-Every channel gets the result back where the task came from (reply, thread, or
-issue comment) with the PR link.
-
-`[repo-name]` or `repo=repo-name` at the start of a message pins the codebase;
-otherwise devagent routes the task to the best-matching registered repo.
+Each agent also receives an auto-generated **repository map** (files, line counts, top-level symbols) so it navigates instead of exploring blindly. URL ingestion uses Firecrawl when configured (JS rendering) and falls back to a built-in fetcher for static pages.
 
 ## How a task runs
 
-1. **Resolve** the target codebase (explicit, or model-routed by repo descriptions).
-2. **Clone** into an isolated per-task workspace, create branch `agent/<id>-<slug>`, run the repo's setup command.
-3. **Run the deep agent** — filesystem + shell tools are rooted to the workspace; it plans (`write_todos`), delegates to subagents, implements, and runs the repo's test command until green.
-4. **Review** — the reviewer subagent checks the final diff.
-5. **Ship** — commit, push, open the PR (the agent calls `open_pull_request`; if it forgets and left committed work, the runner auto-finalizes — disable with `AUTO_FINALIZE=false`). With `REQUIRE_APPROVAL=true`, nothing is pushed: the task parks as **awaiting approval** with the diff in the UI, and an operator ships or rejects it with one click.
-6. **Report** back to the source channel and the UI.
+1. **Resolve** the target codebase (explicit, or model-routed by repo descriptions)
+2. **Clone** into an isolated workspace on branch `agent/<id>-<slug>`; run the repo's setup command; build junk (`__pycache__`, `node_modules`, …) is excluded from git at the workspace level
+3. **Recall** — search long-term memory for conventions and prior learnings about this codebase
+4. **Plan & implement** — todo-list planning, delegation to subagents, real shell + filesystem scoped to the workspace
+5. **Test** until green with the repo's test command
+6. **Review** — the reviewer subagent audits the final diff
+7. **Ship** — commit, push, open the PR. With `REQUIRE_APPROVAL=true` the task instead parks as *awaiting approval* with the diff in the UI for one-click ship/reject
+8. **Record & report** — durable learnings and the task outcome are saved to memory; the result (with PR link) is posted back to the source channel
 
-Need changes after review? Hit **revise** on a completed task (or POST a task
-with `parent_id`): the agent continues on the same branch with the original
-context plus your feedback, and the existing PR updates in place.
-
-Each role in `agents.yaml` also takes `effort: low|medium|high` to control
-reasoning depth (mapped to OpenAI `reasoning_effort`, Anthropic `effort`,
-Gemini `thinking_level`), and every agent starts with an auto-generated
-repository map (files, line counts, top-level symbols) so it navigates instead
-of exploring blindly.
-
-Every step is streamed live (SSE) to the UI and persisted in SQLite, so you can
-audit any past run's full trace: messages, tool calls, shell output, todos,
-subagent activity, and token usage.
-
-## API
-
-The UI is a thin client over a plain REST API you can script against:
-
-```
-GET  /api/health             GET  /api/stats
-GET  /api/tasks              POST /api/tasks {title, description, repo?, model?}
-GET  /api/tasks/{id}         POST /api/tasks/{id}/cancel
-GET  /api/tasks/{id}/events  GET  /api/tasks/{id}/stream   (SSE)
-GET  /api/stream (SSE)       GET/POST/DELETE /api/repos
-GET/PUT /api/config/agents   POST /webhooks/linear
-```
+Need changes after human review? Hit **revise** on a completed task (or `POST /api/tasks` with `parent_id`): the agent continues on the same branch with your feedback, and the existing PR updates in place. Tasks that are impossible or underspecified finish *without* a PR and explain what's blocking.
 
 ## Cost budgets & spend tracking
 
-Every agent step's token usage is priced (built-in table for current Claude,
-Gemini and OpenAI models — override under `pricing:` in `config/agents.yaml` when prices
-drift) and recorded per task. The UI shows per-task cost live and today's total
-spend in the sidebar.
+Every agent and chat message is priced against a built-in per-model table (override under `pricing:`), including cache-read/write multipliers. Per-task budgets abort runs at the cap (with an 80% warning event); the daily budget pauses the queue and blocks chat until midnight UTC. The UI shows per-task cost live, per-reply chat cost, and today's total in the sidebar. Unknown models are tracked by tokens, priced $0, and flagged — never silently guessed.
 
-Two enforcement levers, both off by default:
+## HTTP API
 
-```bash
-TASK_BUDGET_USD=5     # any single run aborts (task fails) past this spend;
-                      # a warning event fires at 80%. Per-task override in the UI.
-DAILY_BUDGET_USD=50   # once today's recorded spend (UTC) reaches this, the
-                      # queue pauses — queued tasks wait until midnight UTC.
+The UI is a thin client over a plain REST API:
+
 ```
-
-Cache reads/writes are priced with provider multipliers (Anthropic ~0.1×/1.25×,
-Gemini reads ~0.25×). Unknown models are tracked by tokens, priced at $0, and
-flagged in the task's usage summary as `unpriced_models` — add them to
-`pricing:` to bring them under budget control.
-
-Chat usage counts too: every chat turn's cost is recorded (shown per reply and
-as `spend_today_chat_usd` in `/api/stats`), included in the daily total, and
-chat returns 429 once the daily budget is exhausted.
+GET  /api/health             GET  /api/stats              GET  /api/models
+GET  /api/tasks              POST /api/tasks              {title, description, repo?, model?, budget_usd?, parent_id?}
+GET  /api/tasks/{id}         POST /api/tasks/{id}/cancel
+POST /api/tasks/{id}/approve POST /api/tasks/{id}/reject
+GET  /api/tasks/{id}/events  GET  /api/tasks/{id}/stream  (SSE)
+GET  /api/stream (SSE)       GET/POST/DELETE /api/repos
+GET/PUT /api/config/agents   POST /api/chat               DELETE /api/chat/{id}
+GET/POST/DELETE /api/resources                            POST /webhooks/linear
+```
 
 ## Security notes
 
-- Agent shell commands run **on the host**, scoped to the task workspace, with
-  a sanitized environment (your API keys are not exposed to the agent's shell).
-  Git credentials are passed to clone/push via process-scoped ephemeral config —
-  the `GITHUB_TOKEN` is never written into the workspace's `.git/config`.
-  Run the Docker image for stronger isolation.
-- Restrict Telegram with `TELEGRAM_ALLOWED_CHATS`; set `LINEAR_WEBHOOK_SECRET`
-  if you expose the webhook.
-- The web UI has no auth — keep it on localhost, a VPN/tailnet, or behind a
-  reverse proxy with auth.
+- Agent shell commands run inside the task workspace with a **sanitized environment** — your API keys are never visible to the agent's shell, and git credentials are passed via process-scoped ephemeral config, never written to disk
+- The web UI/API have no built-in auth: bind to localhost and front with an authenticated reverse proxy (see Deployment)
+- Restrict Telegram with `TELEGRAM_ALLOWED_CHATS`; set `LINEAR_WEBHOOK_SECRET` if you expose the webhook
+- `REQUIRE_APPROVAL=true` guarantees nothing reaches your remotes without human sign-off
+- Run the Docker deployment for filesystem isolation of agent shell commands
 
 ## Development
 
 ```bash
 uv sync
-uv run pytest        # 38 tests
+uv run pytest        # 105 tests
 uv run devagent
 ```
 
-Layout: `src/devagent/` — `agent_factory.py` (deepagents wiring),
-`runner.py` (task pipeline), `worker.py` (queue), `gitops.py` (git/PR),
-`intake/` (telegram/slack/linear), `server.py` (API + SSE), `ui/` (static SPA).
+Layout: `src/devagent/` — `agent_factory.py` (deepagents wiring) · `runner.py` (task pipeline) · `worker.py` (queue + budgets) · `gitops.py` (git/PR) · `memory.py` (Supermemory client) · `chat.py` (task-history assistant) · `pricing.py` (cost tracking) · `intake/` (telegram/slack/linear) · `server.py` (API + SSE) · `ui/` (static SPA, no build step).
