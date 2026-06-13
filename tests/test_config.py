@@ -1,6 +1,12 @@
 import pytest
 
-from sde_deepagent.config import ConfigStore, RepoConfig, is_safe_context_pattern
+from sde_deepagent.config import (
+    ConfigStore,
+    RepoConfig,
+    is_safe_context_pattern,
+    legacy_repo_slug,
+    repo_slug,
+)
 from sde_deepagent.llm import normalize_model_id
 
 
@@ -32,6 +38,15 @@ def test_repo_roundtrip(tmp_path):
     assert cfg.delete_repo("backend") is True
     assert cfg.delete_repo("backend") is False
     assert cfg.repos() == {}
+
+
+def test_repo_slug_prevents_normalization_collisions():
+    assert repo_slug("foo-bar") == "foo-bar"
+    assert repo_slug("foo/bar") != repo_slug("foo-bar")
+    assert repo_slug("FOO-BAR") != repo_slug("foo-bar")
+    generated = repo_slug("foo/bar")
+    assert repo_slug(generated) != generated
+    assert legacy_repo_slug("foo/bar") == "foo-bar"
 
 
 def test_agents_update(tmp_path):

@@ -4,6 +4,39 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-06-13
+
+A hardening and deployment-fix release on top of 0.2.0. Closes an approval-gate
+bypass, makes the Telegram/Slack intakes fail closed, gates GitHub
+auto-revisions to trusted authors, makes repo filesystem identifiers
+collision-resistant, fixes the Docker Compose sandbox path, and extends the
+per-repo sandbox reuse window to 7 days.
+
+### Security
+
+- Per-repo approval overrides now reach the agent prompt and PR tool before any
+  push, so `approval: required` cannot be bypassed when the global default is
+  automatic.
+- Telegram and Slack task creation now fail closed unless explicit chat/user
+  allowlists are configured. GitHub auto-revisions accept feedback only from
+  repository owners, members, and collaborators.
+- Normalized repository filesystem identifiers now include a stable hash when
+  needed, preventing distinct names from sharing a workspace/sandbox boundary.
+
+### Changed
+
+- Per-repo sandbox containers are now reaped after 7 idle days
+  (`SANDBOX_IDLE_HOURS=168`) instead of 24 hours, so a repo's installed
+  toolchain and caches survive up to a week of inactivity before cleanup.
+
+### Fixed
+
+- Docker Compose now includes the Docker CLI, mounts the host Docker socket,
+  and uses an identical absolute `SDE_DATA_DIR` path on host and controller so
+  the sandbox can actually start.
+- Updated the lockfile and deployment/development documentation to match the
+  current release and sandbox defaults.
+
 ## [0.2.0] - 2026-06-13
 
 A security- and isolation-focused release. The agent's shell now runs inside a
@@ -88,5 +121,6 @@ implement → test → review → PR pipeline, multi-channel intake (web UI,
 Telegram, Slack, Linear), per-role model/effort configuration, daily budget
 tracking, and long-term memory.
 
+[0.2.1]: https://github.com/skundu42/sde-deepagent/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/skundu42/sde-deepagent/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/skundu42/sde-deepagent/releases/tag/v0.1.0

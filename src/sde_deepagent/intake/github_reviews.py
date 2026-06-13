@@ -1,7 +1,7 @@
 """Closes the review loop: polls open PRs that the agent created for new human
-review feedback (reviews, inline comments, conversation comments) and queues a
-revision task that continues on the same branch. Requires GITHUB_TOKEN and
-GITHUB_REVIEW_POLLING=true."""
+review feedback (reviews, inline comments, conversation comments) from owners,
+members, or collaborators and queues a revision task that continues on the same
+branch. Requires GITHUB_TOKEN and GITHUB_REVIEW_POLLING=true."""
 
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 PR_URL_RE = re.compile(r"https?://([\w.-]+)/([\w.-]+)/([\w.-]+)/pull/(\d+)")
 OPEN_STATUSES = {"queued", "running", "awaiting_approval"}
+TRUSTED_AUTHOR_ASSOCIATIONS = {"OWNER", "MEMBER", "COLLABORATOR"}
 
 
 def parse_pr_url(url: str) -> tuple[str, str, str, str] | None:
@@ -97,7 +98,9 @@ class GithubReviewIntake:
                 ts = c.get("submitted_at") or c.get("created_at") or ""
                 author = (c.get("user") or {}).get("login", "?")
                 body = (c.get("body") or "").strip()
-                if not body or author.endswith("[bot]"):
+                association = c.get("author_association")
+                if (not body or author.endswith("[bot]")
+                        or association not in TRUSTED_AUTHOR_ASSOCIATIONS):
                     continue
                 if ts and ts > floor:
                     loc = f" ({c['path']}:{c.get('line', '?')})" if c.get("path") else ""

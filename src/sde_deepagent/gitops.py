@@ -15,7 +15,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from .config import RepoConfig, repo_slug
+from .config import RepoConfig, legacy_repo_slug, repo_slug
 from .settings import Settings
 
 
@@ -133,6 +133,10 @@ def control_git_dir_for(settings: Settings, repo_name: str, task_id: str) -> Pat
     return settings.control_git_dir / repo_slug(repo_name) / f"{task_id}.git"
 
 
+def legacy_control_git_dir_for(settings: Settings, repo_name: str, task_id: str) -> Path:
+    return settings.control_git_dir / legacy_repo_slug(repo_name) / f"{task_id}.git"
+
+
 def github_api_for_host(settings: Settings, remote_host: str) -> str:
     """Return the configured API URL only when it matches the remote host."""
     host = remote_host.lower()
@@ -193,6 +197,10 @@ def workspace_root_for(settings: Settings, repo_name: str, task_id: str) -> Path
     return settings.workspaces_dir / repo_slug(repo_name) / task_id
 
 
+def legacy_workspace_root_for(settings: Settings, repo_name: str, task_id: str) -> Path:
+    return settings.workspaces_dir / legacy_repo_slug(repo_name) / task_id
+
+
 async def prepare_workspace(
     task_id: str, title: str, repo: RepoConfig, settings: Settings,
     existing_branch: str | None = None,
@@ -205,7 +213,8 @@ async def prepare_workspace(
 
     Layout is workspaces/<repo_slug>/<task_id>/repo: grouping by repo lets the
     repo's (reusable) sandbox container bind-mount one stable parent directory
-    that covers every task workspace for that repo — and only that repo."""
+    that covers every task workspace for that repo — and only that repo. The
+    repo slug is collision-resistant, so distinct names get distinct parents."""
     ws_root = workspace_root_for(settings, repo.name, task_id)
     if ws_root.exists():
         shutil.rmtree(ws_root)

@@ -60,6 +60,7 @@ def make_pr_tool(
     ws: Workspace,
     settings: Settings,
     result: dict[str, str | None],
+    require_approval: bool,
     on_event: Callable[[str, dict], Awaitable[None]] | None = None,
     redact: Callable[[str], str] | None = None,
 ):
@@ -73,7 +74,7 @@ def make_pr_tool(
             title, body = redact(title), redact(body)
         if await has_changes(ws):
             await commit_all(ws, f"chore: remaining work for {title[:60]}")
-        if settings.require_approval:
+        if require_approval:
             # nothing leaves the machine without a human decision
             result["pr_title"] = title
             result["pr_body"] = body
@@ -227,6 +228,7 @@ async def build_agent(
     sandbox_container: str | None = None,
     sandbox_workdir: str | None = None,
     sandbox_network: str | None = None,
+    require_approval: bool | None = None,
     drain_messages: Callable[[], list[str]] | None = None,
     secrets: dict[str, str] | None = None,
     redactor: Redactor | None = None,
@@ -253,13 +255,17 @@ async def build_agent(
 
     result: dict[str, str | None] = {"pr_url": None, "pr_title": None,
                                      "pr_body": None}
+    effective_approval = settings.require_approval if require_approval is None else require_approval
     # run_tests runs the REGISTERED test command with secrets injected by the
     # controller; the agent and its subagents trigger it but never see the values
     run_tests_tool = make_run_tests_tool(
         test_cmd=ws.repo.test, ws=ws, sandbox_container=sandbox_container,
         sandbox_workdir=sandbox_workdir, secrets=secrets, redact=redact,
         on_event=on_event)
-    tools: list = [make_pr_tool(ws, settings, result, on_event, redact), run_tests_tool]
+    tools: list = [
+        make_pr_tool(ws, settings, result, effective_approval, on_event, redact),
+        run_tests_tool,
+    ]
     if drain_messages is not None:
         tools.append(make_check_messages_tool(drain_messages))
     tools.extend(await load_mcp_tools(agents_cfg.mcp_servers))
@@ -309,7 +315,7 @@ async def build_agent(
         setup_cmd=repo.setup or "(none registered)",
         test_cmd=repo.test or "(none registered — discover it from the repo)",
         task_description=task_description,
-        ship_instructions=SHIP_APPROVAL if settings.require_approval else SHIP_NORMAL,
+        ship_instructions=SHIP_APPROVAL if effective_approval else SHIP_NORMAL,
         repo_map=build_repo_map(ws.path),
         context_block=build_context_block(ws.path, repo, settings),
     ) + memory_prompt

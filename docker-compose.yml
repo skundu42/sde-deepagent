@@ -10,10 +10,16 @@ services:
       # The app binds 0.0.0.0 inside the container, so fail compose startup
       # unless the control plane has application-level authentication.
       AUTH_TOKEN: ${AUTH_TOKEN:?Set AUTH_TOKEN in .env before starting compose}
+      # Must be identical on the host and in this container so sibling task
+      # sandboxes can bind-mount their individual workspace directories.
+      DATA_DIR: ${SDE_DATA_DIR:?Set SDE_DATA_DIR in .env to an absolute host path}
     volumes:
       - ./config:/app/config     # agents.yaml + repos.yaml (hot-editable)
       - ./context:/app/context   # drop company docs here
-      - devagent-data:/app/data  # task db + workspaces
+      - ${SDE_DATA_DIR:?Set SDE_DATA_DIR in .env}:${SDE_DATA_DIR:?Set SDE_DATA_DIR in .env}
+      # The controller launches ephemeral sibling containers. Access to this
+      # socket is host-root-equivalent; keep the control plane authenticated.
+      - /var/run/docker.sock:/var/run/docker.sock
       # Mount your ssh keys if you use git@ remotes instead of GITHUB_TOKEN:
       # - ~/.ssh:/root/.ssh:ro
     depends_on:
@@ -57,5 +63,4 @@ services:
   # Without it, sde-deepagent's built-in fetcher handles static pages.
 
 volumes:
-  devagent-data:
   supermemory-data:

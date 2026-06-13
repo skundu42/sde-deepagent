@@ -4,6 +4,7 @@ API and the next task picks up the change."""
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 import threading
@@ -16,13 +17,30 @@ import yaml
 from .secrets import validate_secret_spec
 
 logger = logging.getLogger(__name__)
+HASHED_SLUG_RE = re.compile(r"--[0-9a-f]{16}$")
+
+
+def legacy_repo_slug(name: str) -> str:
+    """Pre-hardening slug retained only for locating existing workspaces."""
+    s = re.sub(r"[^a-zA-Z0-9_.-]+", "-", name.strip()).strip("-.")
+    return (s or "repo").lower()[:50]
 
 
 def repo_slug(name: str) -> str:
     """Filesystem- and Docker-name-safe slug for a repo name (workspace
-    directories and sandbox containers are keyed by it)."""
-    s = re.sub(r"[^a-zA-Z0-9_.-]+", "-", name.strip()).strip("-.")
-    return (s or "repo").lower()[:50]
+    directories and sandbox containers are keyed by it).
+
+    Preserve simple lowercase names for backwards compatibility, except names
+    using the reserved hashed-slug suffix. Any name that needs normalization
+    gets a stable hash suffix so distinct names such as ``foo/bar`` and
+    ``foo-bar`` cannot share a workspace or sandbox boundary.
+    """
+    raw = name.strip()
+    base = legacy_repo_slug(raw)
+    if raw == base and len(base) <= 50 and not HASHED_SLUG_RE.search(base):
+        return base
+    suffix = hashlib.sha256(raw.encode()).hexdigest()[:16]
+    return f"{base[:32]}--{suffix}"
 
 
 def is_safe_context_pattern(pattern: str) -> bool:

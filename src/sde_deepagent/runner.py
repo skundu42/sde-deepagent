@@ -371,6 +371,7 @@ class TaskRunner:
             if task.repo != repo.name:
                 await self.db.update_task(task.id, repo=repo.name)
                 task.repo = repo.name
+            require_approval = self._resolve_approval(repo)
             # resolve this repo's secrets (host-env refs + encrypted store) and
             # arm the redactor BEFORE any setup/agent output can carry a value
             secrets, missing_secrets = resolve_repo_secrets(
@@ -489,6 +490,7 @@ class TaskRunner:
                 sandbox_container=sandbox_container,
                 sandbox_workdir=sandbox_workdir,
                 sandbox_network=sandbox_network,
+                require_approval=require_approval,
                 drain_messages=lambda: self._drain_mailbox(task.id),
                 secrets=secrets,
                 redactor=self._redactors.get(task.id))
@@ -503,7 +505,6 @@ class TaskRunner:
                 timeout=self.settings.task_timeout_seconds,
             )
 
-            require_approval = self._resolve_approval(repo)
             if require_approval:
                 await self._persist_usage(task, tracker)
                 if await self._request_approval(task, built, final_text):
@@ -557,7 +558,7 @@ class TaskRunner:
             self.daily_budget.untrack(task.id)  # cost is now persisted in the DB
             if sandboxed:
                 # the container stays up for reuse; restamp its idle clock so
-                # the reaper counts the 24h TTL from this task's end
+                # the reaper counts the 7-day TTL from this task's end
                 try:
                     from . import sandbox as sbx
                     sbx.mark_used(sandbox_container,

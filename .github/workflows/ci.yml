@@ -25,5 +25,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      - name: Validate compose
+        run: |
+          cp .env.example .env   # services declare env_file: .env; config requires it to exist
+          SDE_DATA_DIR=/tmp/sde-deepagent-data AUTH_TOKEN=test docker compose config -q
       - name: Build image
         run: docker build -t sde-deepagent:ci .

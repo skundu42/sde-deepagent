@@ -3,7 +3,8 @@ it to create a task; it replies in-thread when the task finishes.
 
 Requires a Slack app with Socket Mode enabled, an app-level token (xapp-...),
 a bot token (xoxb-...) with chat:write + app_mentions:read + im:history scopes,
-and the app_mention + message.im event subscriptions."""
+and the app_mention + message.im event subscriptions. Task creation is denied
+until SLACK_ALLOWED_USERS explicitly lists users (or is set to "*")."""
 
 from __future__ import annotations
 
@@ -23,12 +24,20 @@ class SlackIntake:
     def __init__(self, settings: Settings, db: Database):
         self.settings = settings
         self.db = db
+        self.allowed = settings.slack_allowed_user_ids()
+        self.allow_all = settings.slack_allow_all
         self._client = None
         self._web = None
+
+    def _allowed_user(self, user_id: str | None) -> bool:
+        return bool(user_id) and (self.allow_all or user_id in self.allowed)
 
     def start(self) -> None:
         import asyncio
 
+        if not self.allow_all and not self.allowed:
+            logger.warning("slack intake has no SLACK_ALLOWED_USERS; "
+                           "all task-creation messages will be ignored")
         asyncio.create_task(self._run(), name="slack-intake")
 
     async def _run(self) -> None:
@@ -60,6 +69,10 @@ class SlackIntake:
             channel = event.get("channel")
             if not channel:
                 return  # malformed event; nowhere to reply
+            user = event.get("user")
+            if not self._allowed_user(user):
+                logger.warning("ignoring message from non-allowed Slack user %s", user)
+                return
             text = MENTION_RE.sub("", event.get("text", "")).strip()
             if not text:
                 return

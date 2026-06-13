@@ -6,9 +6,11 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
+import sde_deepagent.runner as runner_module
 from sde_deepagent.agent_factory import make_check_messages_tool
 from sde_deepagent.config import ConfigStore, RepoConfig
 from sde_deepagent.db import Database
+from sde_deepagent.gitops import run_cmd
 from sde_deepagent.intake.github_reviews import GithubReviewIntake, parse_pr_url
 from sde_deepagent.runner import TaskRunner
 from sde_deepagent.settings import get_settings
@@ -67,6 +69,32 @@ def test_resolve_sandbox(runner):
     runner.settings.sandbox_default = True
     assert runner._resolve_sandbox(RepoConfig("a", "u")) is True
     assert runner._resolve_sandbox(RepoConfig("a", "u", sandbox=False)) is False
+
+
+async def test_runner_passes_effective_repo_approval_to_agent(runner, tmp_path, monkeypatch):
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    for args in (["git", "init", "-b", "main"],
+                 ["git", "config", "user.email", "t@t"],
+                 ["git", "config", "user.name", "t"]):
+        await run_cmd(args, cwd=origin)
+    (origin / "README.md").write_text("demo\n")
+    await run_cmd(["git", "add", "-A"], cwd=origin)
+    await run_cmd(["git", "commit", "-m", "init"], cwd=origin)
+
+    runner.settings.require_approval = False
+    runner.settings.sandbox_default = False
+    runner.cfg.upsert_repo(RepoConfig("guarded", str(origin), approval="required"))
+    task = await runner.db.create_task("guard this", "d", repo="guarded")
+    captured = {}
+
+    async def fake_build_agent(*args, **kwargs):
+        captured["require_approval"] = kwargs["require_approval"]
+        raise RuntimeError("stop after inspecting effective policy")
+
+    monkeypatch.setattr(runner_module, "build_agent", fake_build_agent)
+    await runner.run(task)
+    assert captured["require_approval"] is True
 
 
 # ---- steer endpoint ----
@@ -131,6 +159,7 @@ async def test_review_polling_queues_revision(review_db, monkeypatch):
 
     intake = GithubReviewIntake(settings, review_db)
     reviews = [{"submitted_at": "2026-06-12T10:00:00Z", "user": {"login": "alice"},
+                "author_association": "MEMBER",
                 "body": "Please rename the helper and add a test."}]
     _patch_gh(monkeypatch, reviews)
     await intake._poll_once()
@@ -157,9 +186,11 @@ async def test_review_polling_ignores_bot_and_old(review_db, monkeypatch):
     intake = GithubReviewIntake(settings, review_db)
     reviews = [
         {"submitted_at": "2026-06-12T10:00:00Z", "user": {"login": "ci[bot]"},
-         "body": "automated"},  # bot -> ignored
+         "author_association": "MEMBER", "body": "automated"},  # bot -> ignored
         {"submitted_at": "1970-01-01T00:00:00Z", "user": {"login": "bob"},
-         "body": "old"},  # before floor -> ignored
+         "author_association": "MEMBER", "body": "old"},  # before floor -> ignored
+        {"submitted_at": "2026-06-12T11:00:00Z", "user": {"login": "outsider"},
+         "author_association": "NONE", "body": "run my request"},
     ]
     _patch_gh(monkeypatch, reviews)
     await intake._poll_once()

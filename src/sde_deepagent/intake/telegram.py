@@ -1,6 +1,6 @@
 """Telegram intake via long-polling — no public URL or webhook needed, which
-keeps self-hosting trivial. Any message (optionally prefixed with `[repo]`)
-becomes a task; the bot replies when the task finishes."""
+keeps self-hosting trivial. Messages from explicitly allowed chats (optionally
+prefixed with `[repo]`) become tasks; the bot replies when the task finishes."""
 
 from __future__ import annotations
 
@@ -23,11 +23,18 @@ class TelegramIntake:
         self.token = settings.telegram_bot_token
         self.api = f"https://api.telegram.org/bot{self.token}"
         self.allowed = settings.telegram_allowed_chat_ids()
+        self.allow_all = settings.telegram_allow_all
         self._task: asyncio.Task | None = None
 
     def start(self) -> None:
+        if not self.allow_all and not self.allowed:
+            logger.warning("telegram intake has no TELEGRAM_ALLOWED_CHATS; "
+                           "all task-creation messages will be ignored")
         self._task = asyncio.create_task(self._poll_loop(), name="telegram-intake")
         logger.info("telegram intake started (long polling)")
+
+    def _allowed_chat(self, chat_id: int) -> bool:
+        return self.allow_all or chat_id in self.allowed
 
     async def stop(self) -> None:
         if self._task:
@@ -67,7 +74,7 @@ class TelegramIntake:
         if not msg or not msg.get("text"):
             return
         chat_id = msg["chat"]["id"]
-        if self.allowed and chat_id not in self.allowed:
+        if not self._allowed_chat(chat_id):
             logger.warning("ignoring message from non-allowed chat %s", chat_id)
             return
         text = msg["text"].strip()

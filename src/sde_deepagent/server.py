@@ -298,6 +298,8 @@ def create_app() -> FastAPI:
             Workspace,
             control_git_dir_for,
             create_pull_request,
+            legacy_control_git_dir_for,
+            legacy_workspace_root_for,
             push_branch,
             workspace_root_for,
         )
@@ -308,10 +310,15 @@ def create_app() -> FastAPI:
             raise HTTPException(409, f"repo '{task.repo}' is no longer registered")
         path = workspace_root_for(s, task.repo, task.id) / "repo"
         if not path.exists():
+            path = legacy_workspace_root_for(s, task.repo, task.id) / "repo"
+        if not path.exists():
             raise HTTPException(409, "workspace no longer on disk — re-run the task")
+        control_git_dir = control_git_dir_for(s, repo.name, task.id)
+        if not control_git_dir.exists():
+            control_git_dir = legacy_control_git_dir_for(s, repo.name, task.id)
         ws = Workspace(
             task_id=task.id, repo=repo, path=path, branch=task.branch,
-            control_git_dir=control_git_dir_for(s, repo.name, task.id),
+            control_git_dir=control_git_dir,
         )
         if not ws.control_git_dir.exists():
             raise HTTPException(409, "trusted Git metadata no longer on disk — re-run the task")

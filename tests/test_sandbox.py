@@ -13,8 +13,10 @@ from sde_deepagent import sandbox
 
 def test_container_name_is_per_repo():
     assert sandbox.container_name("backend") == "sde-repo-backend"
-    # unsafe characters are slugged, never passed to docker raw
-    assert sandbox.container_name("My Repo!") == "sde-repo-my-repo"
+    # unsafe characters are slugged/hashed, never passed to docker raw
+    assert sandbox.container_name("My Repo!").startswith("sde-repo-my-repo")
+    # names that would collide under plain slugging get distinct containers
+    assert sandbox.container_name("foo/bar") != sandbox.container_name("foo-bar")
 
 
 # ---- exec ----

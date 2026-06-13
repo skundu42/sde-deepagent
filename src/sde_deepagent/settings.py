@@ -24,10 +24,13 @@ class Settings(BaseSettings):
 
     # --- intake channels (each optional) ---
     telegram_bot_token: str | None = None
-    telegram_allowed_chats: str = ""  # comma-separated chat ids; empty = allow all
+    # comma-separated chat ids; empty = deny all; "*" is an explicit allow-all
+    telegram_allowed_chats: str = ""
 
     slack_bot_token: str | None = None  # xoxb-...
     slack_app_token: str | None = None  # xapp-... (Socket Mode)
+    # comma-separated Slack user ids; empty = deny all; "*" is explicit allow-all
+    slack_allowed_users: str = ""
 
     # --- long-term memory (optional): self-hosted supermemory ---
     supermemory_base_url: str | None = None  # e.g. http://localhost:6767
@@ -88,7 +91,7 @@ class Settings(BaseSettings):
     sandbox_network: str = "bridge"   # bridge | none — egress policy inside the sandbox
     sandbox_memory: str = "2g"
     sandbox_cpus: str = "2"
-    sandbox_idle_hours: float = 24.0  # remove a repo's container idle this long
+    sandbox_idle_hours: float = 168.0  # remove a repo's container idle this long (7 days)
 
     # --- LLM cost budgets (USD; 0 = unlimited) ---
     task_budget_usd: float = 0.0   # default per-task cap (overridable per task)
@@ -118,7 +121,24 @@ class Settings(BaseSettings):
         return self.data_dir / "secrets.enc"
 
     def telegram_allowed_chat_ids(self) -> set[int]:
-        return {int(c) for c in self.telegram_allowed_chats.split(",") if c.strip()}
+        return {
+            int(c) for c in self.telegram_allowed_chats.split(",")
+            if c.strip() and c.strip() != "*"
+        }
+
+    @property
+    def telegram_allow_all(self) -> bool:
+        return "*" in {c.strip() for c in self.telegram_allowed_chats.split(",")}
+
+    def slack_allowed_user_ids(self) -> set[str]:
+        return {
+            user.strip() for user in self.slack_allowed_users.split(",")
+            if user.strip() and user.strip() != "*"
+        }
+
+    @property
+    def slack_allow_all(self) -> bool:
+        return "*" in {u.strip() for u in self.slack_allowed_users.split(",")}
 
 
 def is_loopback_host(host: str) -> bool:

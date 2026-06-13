@@ -1,5 +1,8 @@
 from sde_deepagent.db import Task
 from sde_deepagent.intake.base import parse_task_text, task_summary
+from sde_deepagent.intake.slack import SlackIntake
+from sde_deepagent.intake.telegram import TelegramIntake
+from sde_deepagent.settings import get_settings
 
 
 def test_parse_plain():
@@ -34,3 +37,31 @@ def test_summaries():
     assert "without a PR" in task_summary(_task(pr_url=None))
     assert "failed" in task_summary(_task(status="failed", error="boom"))
     assert "cancelled" in task_summary(_task(status="cancelled"))
+
+
+def test_external_chat_intakes_deny_by_default(temp_env):
+    settings = get_settings()
+    telegram = TelegramIntake(settings, None)
+    slack = SlackIntake(settings, None)
+    assert telegram._allowed_chat(12345) is False
+    assert slack._allowed_user("U123") is False
+
+
+def test_external_chat_intakes_require_explicit_allowlist(temp_env):
+    settings = get_settings()
+    settings.telegram_allowed_chats = "12345"
+    settings.slack_allowed_users = "U123"
+    telegram = TelegramIntake(settings, None)
+    slack = SlackIntake(settings, None)
+    assert telegram._allowed_chat(12345) is True
+    assert telegram._allowed_chat(99999) is False
+    assert slack._allowed_user("U123") is True
+    assert slack._allowed_user("U999") is False
+
+
+def test_external_chat_intakes_allow_all_only_with_wildcard(temp_env):
+    settings = get_settings()
+    settings.telegram_allowed_chats = "*"
+    settings.slack_allowed_users = "*"
+    assert TelegramIntake(settings, None)._allowed_chat(99999) is True
+    assert SlackIntake(settings, None)._allowed_user("U999") is True

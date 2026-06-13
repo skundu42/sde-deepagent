@@ -9,7 +9,7 @@ installed toolchains and dependency caches survive between runs. The container
 mounts the repo's workspace parent (`workspaces/<repo_slug>`) at /workspaces;
 each task's commands execute with the working directory pinned to its own
 subtree. A reaper removes containers that have been idle past the TTL
-(SANDBOX_IDLE_HOURS, default 24h since the last task touched them).
+(SANDBOX_IDLE_HOURS, default 7 days since the last task touched them).
 
 Zero-config environments: the default image is a generic Debian build image
 (buildpack-deps:bookworm — git, gcc, make, curl, common dev libraries),

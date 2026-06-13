@@ -2,9 +2,9 @@
 
 **A self-hostable software developer agent system.** Assign it a task — from the web UI, Telegram, Slack, or Linear — and it clones the right codebase, plans, implements the change, runs the tests, and opens a pull request.
 
-Built on [LangChain deepagents](https://docs.langchain.com/oss/python/deepagents/overview). The only required external dependency is a model API key (Anthropic, Google Gemini, and/or OpenAI); everything else — queue, storage, UI, event streaming, long-term memory — runs on your own infrastructure.
+Built on [LangChain deepagents](https://docs.langchain.com/oss/python/deepagents/overview). Bring a model API key (Anthropic, Google Gemini, and/or OpenAI) and Docker for the default sandboxed execution path; everything else — queue, storage, UI, event streaming, long-term memory — runs on your own infrastructure.
 
-![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue) ![self--hosted](https://img.shields.io/badge/deployment-self--hosted-green) ![tests](https://img.shields.io/badge/tests-225%20passing-brightgreen) ![license](https://img.shields.io/badge/license-MIT-blue)
+![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue) ![self--hosted](https://img.shields.io/badge/deployment-self--hosted-green) ![tests](https://img.shields.io/badge/tests-230%20passing-brightgreen) ![license](https://img.shields.io/badge/license-MIT-blue)
 
 ---
 
@@ -12,7 +12,7 @@ Built on [LangChain deepagents](https://docs.langchain.com/oss/python/deepagents
 
 - **Orchestrator + specialist subagents** (explorer / coder / tester / reviewer) — model *and* reasoning effort configurable per role, providers freely mixed
 - **Full task pipeline**: isolated git workspace → plan → implement → test until green → diff review → commit → push → GitHub PR
-- **Multi-channel intake**: web UI, Telegram (long-polling), Slack (Socket Mode), Linear (label polling + webhook) — no public URL required; results are reported back to the originating channel
+- **Multi-channel intake**: web UI, allowlisted Telegram/Slack users, and Linear (label polling + webhook) — no public URL required; results are reported back to the originating channel
 - **Long-term memory** (self-hosted [Supermemory](https://supermemory.ai/docs/self-hosting/overview)): agents recall conventions and gotchas from past tasks and record new learnings; every task outcome is stored per codebase
 - **Company context**: per-repo doc globs, repo convention files (`AGENTS.md`, `CLAUDE.md`, …), a global `context/` folder, and a **Resources** page that ingests any URL or text into memory (optional Firecrawl for JS-rendered pages)
 - **Cost control**: per-message cost tracking, per-task budgets that abort runaway runs, a daily budget that pauses the queue, live spend in the UI
@@ -45,7 +45,9 @@ uv sync
 uv run sde-deepagent             # → http://localhost:8321
 ```
 
-Then in the UI: **Codebases** → register a repo (git URL or local path, test command) → **New task** → watch the live agent trace; the PR link appears when it ships.
+Docker must be running unless you explicitly disable sandboxing. Then in the
+UI: **Codebases** → register a repo (git URL or local path, test command) →
+**New task** → watch the live agent trace; the PR link appears when it ships.
 
 ## Deploying on a server
 
@@ -60,6 +62,7 @@ curl -fsSL https://get.docker.com | sh
 git clone https://github.com/skundu42/sde-deepagent.git /opt/sde-deepagent
 cd /opt/sde-deepagent
 cp .env.example .env
+mkdir -p /opt/sde-deepagent/data
 ```
 
 Edit `.env` with at minimum one model key, and a `GITHUB_TOKEN` so the agent can push branches and open PRs (classic PAT with `repo` scope, or a fine-grained PAT with *Contents* and *Pull requests* read/write):
@@ -68,15 +71,18 @@ Edit `.env` with at minimum one model key, and a `GITHUB_TOKEN` so the agent can
 OPENAI_API_KEY=sk-...        # and/or ANTHROPIC_API_KEY / GOOGLE_API_KEY
 GITHUB_TOKEN=ghp_...
 AUTH_TOKEN=<openssl-rand-hex-32>
+SDE_DATA_DIR=/opt/sde-deepagent/data  # absolute host path; required by Compose sandboxes
 DAILY_BUDGET_USD=50          # strongly recommended on a server
 REQUIRE_APPROVAL=true        # recommended until you trust it unattended
 ```
 
 ### 2. Lock the ports to localhost
 
-Docker Compose requires `AUTH_TOKEN` and publishes both ports on localhost only.
-The service also refuses any non-loopback bind without `AUTH_TOKEN`, so an
-accidental configuration change cannot expose an unauthenticated control plane.
+Docker Compose requires `AUTH_TOKEN` and an absolute `SDE_DATA_DIR`, and
+publishes both ports on localhost only. The data path is mounted at the same
+absolute path inside the controller so sibling task sandboxes can mount their
+individual workspace. Compose also mounts the host Docker socket; treat access
+to the authenticated control plane as host-root-equivalent.
 
 ### 3. Start and wire up memory
 
@@ -112,7 +118,7 @@ SSE streaming works through Caddy/nginx out of the box (the API sets `X-Accel-Bu
 |---|---|
 | Update | `git pull && docker compose up -d --build` |
 | Logs | `docker compose logs -f devagent` |
-| Backup | `data` volumes (`devagent-data`: task DB + workspaces, `supermemory-data`: memories) plus `.env` and `config/` on the host |
+| Backup | `$SDE_DATA_DIR` (task DB + workspaces), the `supermemory-data` volume, `.env`, and `config/` |
 | Budget guardrail | `DAILY_BUDGET_USD` pauses the queue at the cap (UTC day); per-task caps via `TASK_BUDGET_USD` or the new-task form |
 | Crash recovery | tasks interrupted by a restart are marked failed (never silently lost); `awaiting_approval` work survives restarts |
 
@@ -180,6 +186,7 @@ All runtime settings come from `.env` (see [`.env.example`](.env.example) for th
 | `SUPERMEMORY_BASE_URL`, `SUPERMEMORY_API_KEY` | long-term memory (optional) |
 | `FIRECRAWL_API_URL` / `FIRECRAWL_API_KEY` | JS-rendering scraper for the Resources page (optional) |
 | `TELEGRAM_BOT_TOKEN`, `SLACK_BOT_TOKEN` + `SLACK_APP_TOKEN`, `LINEAR_API_KEY` | intake channels (each optional) |
+| `TELEGRAM_ALLOWED_CHATS`, `SLACK_ALLOWED_USERS` | authorized chat/user IDs; empty denies task creation, `*` explicitly allows all |
 | `TASK_BUDGET_USD`, `DAILY_BUDGET_USD` | cost guardrails (0 = unlimited) |
 | `REQUIRE_APPROVAL` | hold every task for human review before push/PR |
 | `SECRETS_KEY` | enables UI-entered [per-repo secrets](#per-repo-secrets-for-setuptests-that-need-credentials), encrypted at rest |
@@ -310,25 +317,25 @@ GET/POST/DELETE /api/resources                            POST /webhooks/linear
 Defense in depth, each layer independently configurable:
 
 - **API auth** — every non-loopback bind requires `AUTH_TOKEN`; otherwise startup fails. Every `/api/*` request and SSE stream then requires the bearer token (header, or `?token=` for EventSource). Health and the HMAC-verified Linear webhook stay open; the UI prompts for the token and remembers it for the session. Still front production with TLS.
-- **Per-repo container sandbox (on by default)** — each task's shell runs in its repo's Docker container with only that repo's workspaces bind-mounted: arbitrary build/test commands and untrusted repo code can't reach the host filesystem or other repos' workspaces. Environments are **zero-config**: the container starts from a generic, language-agnostic Debian build image (`buildpack-deps:bookworm`) and the agent installs whatever toolchain and dependencies the repo needs; the container is **reused across tasks** (reaped after 24 idle hours, `SANDBOX_IDLE_HOURS`), so installs and caches persist instead of repeating. Tune per repo or globally: pin a stack image (`sandbox_image` / `SANDBOX_IMAGE`), cut egress for untrusted code (`sandbox_network: none` / `SANDBOX_NETWORK=none` — self-bootstrapping then needs a pinned image or `setup`), or opt out entirely (`sandbox: false` / `SANDBOX_DEFAULT=false` to run on the host). If sandboxing applies but Docker is unavailable, the task **fails** rather than silently running on the host. (Mount `/var/run/docker.sock` into the devagent container for the compose deployment.)
+- **Per-repo container sandbox (on by default)** — each task's shell runs in its repo's Docker container with only that repo's workspaces bind-mounted: arbitrary build/test commands and untrusted repo code can't reach the host filesystem or other repos' workspaces. Environments are **zero-config**: the container starts from a generic, language-agnostic Debian build image (`buildpack-deps:bookworm`) and the agent installs whatever toolchain and dependencies the repo needs; the container is **reused across tasks** (reaped after 7 idle days, `SANDBOX_IDLE_HOURS`), so installs and caches persist instead of repeating. Tune per repo or globally: pin a stack image (`sandbox_image` / `SANDBOX_IMAGE`), cut egress for untrusted code (`sandbox_network: none` / `SANDBOX_NETWORK=none` — self-bootstrapping then needs a pinned image or `setup`), or opt out entirely (`sandbox: false` / `SANDBOX_DEFAULT=false` to run on the host). If sandboxing applies but Docker is unavailable, the task **fails** rather than silently running on the host. (Mount `/var/run/docker.sock` into the devagent container for the compose deployment.)
 - **Prompt-injection resistance** — the orchestrator treats all repository content, documents, web pages, and memory entries as untrusted *data*, never instructions; operator guidance arrives only through the steering channel.
 - **Sanitized shell env** — API keys are never visible to the agent's shell; git credentials use process-scoped ephemeral config, never written to disk.
 - **Per-repo secrets, kept from the model** — repos can reference host env vars (`secrets: {NAME: env:HOST_VAR}`) for setup/tests; values are injected only into controller-run commands (never the agent's shell) and redacted (raw/base64/url-encoded) from every output sink. See [Per-repo secrets](#per-repo-secrets-for-setuptests-that-need-credentials) for the model and its residual risk.
 - **Trusted Git shipping** — controller commits, diffs, and pushes use protected Git metadata outside sandbox mounts, with hooks disabled, a minimal environment, exact-URL credentials, and trusted-host checks.
 - **Approval gate** — global `REQUIRE_APPROVAL=true` or per-repo `approval: required` holds work for human review before any push; `approval: auto` lets trusted repos flow.
-- Restrict Telegram with `TELEGRAM_ALLOWED_CHATS`; set `LINEAR_WEBHOOK_SECRET` if you expose that webhook.
+- Telegram and Slack deny task creation until `TELEGRAM_ALLOWED_CHATS` and `SLACK_ALLOWED_USERS` are set; use `*` only for an intentional allow-all. GitHub auto-revisions accept comments only from owners, members, and collaborators. Set `LINEAR_WEBHOOK_SECRET` if you expose that webhook.
 
 ## Human-in-the-loop & the review loop
 
 - **Mid-task steering** — send an instruction to a running task (UI steer bar or `POST /api/tasks/{id}/steer`); the agent picks it up at its next checkpoint (always before opening the PR).
 - **Manual revisions** — **revise** a completed task to continue on the same branch with your feedback; the existing PR updates in place.
-- **Automatic review loop** — `GITHUB_REVIEW_POLLING=true` watches the PRs devagent opened for new human review comments and auto-queues a revision to address them.
+- **Automatic review loop** — `GITHUB_REVIEW_POLLING=true` watches the PRs devagent opened and auto-queues revisions only for comments from repository owners, members, or collaborators.
 
 ## Development
 
 ```bash
 uv sync
-uv run pytest        # 105 tests
+uv run pytest
 uv run sde-deepagent
 ```
 
