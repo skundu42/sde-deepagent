@@ -10,15 +10,30 @@ Built on [LangChain deepagents](https://docs.langchain.com/oss/python/deepagents
 
 ## Features
 
-- **Orchestrator + specialist subagents** (explorer / coder / tester / reviewer) — model *and* reasoning effort configurable per role, providers freely mixed
-- **Full task pipeline**: isolated git workspace → plan → implement → test until green → diff review → commit → push → GitHub PR
-- **Multi-channel intake**: web UI, allowlisted Telegram/Slack users, and Linear (label polling + webhook) — no public URL required; results are reported back to the originating channel
-- **Long-term memory** (self-hosted [Supermemory](https://supermemory.ai/docs/self-hosting/overview)): agents recall conventions and gotchas from past tasks and record new learnings; every task outcome is stored per codebase
-- **Company context**: per-repo doc globs, repo convention files (`AGENTS.md`, `CLAUDE.md`, …), a global `context/` folder, and a **Resources** page that ingests any URL or text into memory (optional Firecrawl for JS-rendered pages)
-- **Cost control**: per-message cost tracking, per-task budgets that abort runaway runs, a daily budget that pauses the queue, live spend in the UI
-- **Human oversight**: optional approval gate (nothing is pushed until an operator reviews the diff), one-click PR revisions that reuse the branch, full live trace of every agent step
-- **Chat**: ask an assistant about any past or running task — grounded in the actual task records, traces, and memory
-- **Observability**: every message, tool call, shell command, and token persisted in SQLite and streamed live over SSE
+| Feature | What it does |
+|---|---|
+| **Orchestrator + subagents** | explorer / coder / tester / reviewer — model *and* reasoning effort configurable per role, providers freely mixed |
+| **Full task pipeline** | isolated git workspace → plan → implement → test until green → diff review → commit → push → GitHub PR |
+| **Multi-channel intake** | web UI, allowlisted Telegram/Slack, and Linear (label polling + webhook) — no public URL required; results posted back to the source channel |
+| **Sandboxed execution** | each repo's shell runs in its own reused Docker container, isolated from the host and other repos' workspaces |
+| **Long-term memory** | self-hosted [Supermemory](https://supermemory.ai/docs/self-hosting/overview) — recalls conventions and gotchas from past tasks, records new learnings per codebase |
+| **Company context** | per-repo doc globs, convention files (`AGENTS.md`, `CLAUDE.md`, …), a global `context/` folder, and a Resources page that ingests any URL or text |
+| **Cost control** | per-task budgets that abort runaway runs, a daily budget that pauses the queue, live spend in the UI |
+| **Human oversight** | optional approval gate (nothing ships until you review the diff), mid-task steering, one-click PR revisions on the same branch |
+| **Chat** | ask an assistant about any past or running task — grounded in the actual records, traces, and memory |
+| **Observability** | every message, tool call, shell command, and token persisted in SQLite and streamed live over SSE |
+
+## Supported models
+
+Set models per role in `config/agents.yaml` (or UI → Agents) as `provider:model`. Any model from a known provider works — the picks below are just the UI dropdown shortcuts.
+
+| Provider | Prefix | Curated picks |
+|---|---|---|
+| Anthropic | `anthropic:` | `claude-opus-4-8`, `claude-sonnet-4-6`, `claude-haiku-4-5-20251001` |
+| Google Gemini | `google_genai:` | `gemini-3.1-pro-preview`, `gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-2.5-flash-lite` |
+| OpenAI | `openai:` | `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.4-nano`, `gpt-5-mini`, `gpt-4.1`, `o3`, `o4-mini` |
+
+Each role also takes an `effort: low | medium | high` knob that maps to the provider's native control (OpenAI `reasoning_effort`, Anthropic `effort`, Gemini `thinking_level`).
 
 ## Architecture
 
@@ -36,144 +51,33 @@ Built on [LangChain deepagents](https://docs.langchain.com/oss/python/deepagents
 
 Single process: FastAPI server, asyncio worker pool, SQLite persistence, static UI. Supermemory runs as a sidecar (compose service or local binary).
 
-## Quick start (local)
+## Setup
+
+**Local:**
 
 ```bash
 git clone https://github.com/skundu42/sde-deepagent.git && cd sde-deepagent
-cp .env.example .env        # add ANTHROPIC_API_KEY / GOOGLE_API_KEY / OPENAI_API_KEY
+cp .env.example .env        # add ≥1 model key, plus GITHUB_TOKEN to open PRs
 uv sync
-uv run sde-deepagent             # → http://localhost:8321
+uv run sde-deepagent        # → http://localhost:8321
 ```
 
-Docker must be running unless you explicitly disable sandboxing. Then in the
-UI: **Codebases** → register a repo (git URL or local path, test command) →
-**New task** → watch the live agent trace; the PR link appears when it ships.
+Docker must be running (the default sandboxed execution path) unless you set `SANDBOX_DEFAULT=false`.
 
-## Deploying on a server
-
-The recommended production setup is Docker Compose behind a TLS reverse proxy. A 2 vCPU / 4 GB VM is sufficient (no GPU — local embeddings run quantized on CPU; all LLM inference is API-side).
-
-### 1. Provision
+**Docker Compose (production):**
 
 ```bash
-# Ubuntu/Debian: install Docker Engine + compose plugin
-curl -fsSL https://get.docker.com | sh
-
-git clone https://github.com/skundu42/sde-deepagent.git /opt/sde-deepagent
-cd /opt/sde-deepagent
-cp .env.example .env
-mkdir -p /opt/sde-deepagent/data
-```
-
-Edit `.env` with at minimum one model key, and a `GITHUB_TOKEN` so the agent can push branches and open PRs (classic PAT with `repo` scope, or a fine-grained PAT with *Contents* and *Pull requests* read/write):
-
-```bash
-OPENAI_API_KEY=sk-...        # and/or ANTHROPIC_API_KEY / GOOGLE_API_KEY
-GITHUB_TOKEN=ghp_...
-AUTH_TOKEN=<openssl-rand-hex-32>
-SDE_DATA_DIR=/opt/sde-deepagent/data  # absolute host path; required by Compose sandboxes
-DAILY_BUDGET_USD=50          # strongly recommended on a server
-REQUIRE_APPROVAL=true        # recommended until you trust it unattended
-```
-
-### 2. Lock the ports to localhost
-
-Docker Compose requires `AUTH_TOKEN` and an absolute `SDE_DATA_DIR`, and
-publishes both ports on localhost only. The data path is mounted at the same
-absolute path inside the controller so sibling task sandboxes can mount their
-individual workspace. Compose also mounts the host Docker socket; treat access
-to the authenticated control plane as host-root-equivalent.
-
-### 3. Start and wire up memory
-
-```bash
+cp .env.example .env        # set AUTH_TOKEN, SDE_DATA_DIR (absolute path), ≥1 model key, GITHUB_TOKEN
 docker compose up -d --build
 
-# first boot only: copy supermemory's generated API key into .env
+# first boot only: copy supermemory's generated key into .env, then recreate
 docker compose logs supermemory | grep "api key"
-echo 'SUPERMEMORY_API_KEY=sm_...' >> .env       # paste the printed key
-docker compose up -d                            # recreate sde-deepagent with the key
+echo 'SUPERMEMORY_API_KEY=sm_...' >> .env && docker compose up -d
 ```
 
-`SUPERMEMORY_BASE_URL` is already pointed at the sidecar by the compose file. Verify: `curl -s localhost:8321/api/health` should show `"ok": true` and `"memory": true`.
+Compose publishes both ports on localhost only and refuses to start without `AUTH_TOKEN`; front it with a TLS reverse proxy. On a server, set `REQUIRE_APPROVAL=true` and `DAILY_BUDGET_USD`. It mounts the host Docker socket to launch sandbox containers — treat access to the control plane as host-root-equivalent.
 
-### 4. Reverse proxy with TLS + auth
-
-Any proxy works; [Caddy](https://caddyserver.com) is the shortest path to TLS + basic auth (generate the hash with `caddy hash-password`):
-
-```caddyfile
-sde-deepagent.yourdomain.com {
-    basic_auth {
-        admin $2a$14$...hashed-password...
-    }
-    reverse_proxy 127.0.0.1:8321
-}
-```
-
-SSE streaming works through Caddy/nginx out of the box (the API sets `X-Accel-Buffering: no`). If you use the Linear webhook, set `LINEAR_WEBHOOK_SECRET` and expose only `/webhooks/linear` unauthenticated. Telegram and Slack intakes poll outbound — they need no inbound route at all.
-
-### 5. Operations
-
-| Concern | How |
-|---|---|
-| Update | `git pull && docker compose up -d --build` |
-| Logs | `docker compose logs -f devagent` |
-| Backup | `$SDE_DATA_DIR` (task DB + workspaces), the `supermemory-data` volume, `.env`, and `config/` |
-| Budget guardrail | `DAILY_BUDGET_USD` pauses the queue at the cap (UTC day); per-task caps via `TASK_BUDGET_USD` or the new-task form |
-| Crash recovery | tasks interrupted by a restart are marked failed (never silently lost); `awaiting_approval` work survives restarts |
-
-<details>
-<summary><b>Alternative: bare-metal with systemd (no Docker)</b></summary>
-
-```bash
-# as a dedicated user, in /opt/sde-deepagent
-curl -LsSf https://astral.sh/uv/install.sh | sh
-uv sync --no-dev
-curl -fsSL https://supermemory.ai/install | bash   # installs supermemory-server
-```
-
-`/etc/systemd/system/supermemory.service`:
-
-```ini
-[Unit]
-Description=Supermemory local server
-After=network-online.target
-
-[Service]
-User=sde-deepagent
-WorkingDirectory=/opt/sde-deepagent
-EnvironmentFile=/opt/sde-deepagent/.env
-Environment=SUPERMEMORY_DATA_DIR=/opt/sde-deepagent/data/supermemory
-ExecStart=/home/sde-deepagent/.local/bin/supermemory-server
-Restart=on-failure
-
-[Install]
-WantedBy=multi-user.target
-```
-
-`/etc/systemd/system/sde-deepagent.service`:
-
-```ini
-[Unit]
-Description=sde-deepagent
-After=network-online.target supermemory.service
-
-[Service]
-User=sde-deepagent
-WorkingDirectory=/opt/sde-deepagent
-ExecStart=/home/sde-deepagent/.local/bin/uv run --no-sync sde-deepagent
-Restart=on-failure
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```bash
-systemctl enable --now supermemory sde-deepagent
-```
-
-sde-deepagent reads `.env` from its working directory; `git` must be on the PATH.
-</details>
+Then in the UI: **Codebases** → register a repo (git URL or local path, test command) → **New task** → watch the live trace; the PR link appears when it ships.
 
 ## Configuration
 
@@ -183,33 +87,31 @@ All runtime settings come from `.env` (see [`.env.example`](.env.example) for th
 |---|---|
 | `ANTHROPIC_API_KEY` / `GOOGLE_API_KEY` / `OPENAI_API_KEY` | model providers (≥ 1 required) |
 | `GITHUB_TOKEN`, `GITHUB_API_URL` | push branches + open PRs (GitHub / GHE) |
+| `AUTH_TOKEN` | bearer token for the API/UI; required for any non-loopback bind |
+| `SDE_DATA_DIR` | absolute host data path (task DB + workspaces); required by Compose |
 | `SUPERMEMORY_BASE_URL`, `SUPERMEMORY_API_KEY` | long-term memory (optional) |
 | `FIRECRAWL_API_URL` / `FIRECRAWL_API_KEY` | JS-rendering scraper for the Resources page (optional) |
 | `TELEGRAM_BOT_TOKEN`, `SLACK_BOT_TOKEN` + `SLACK_APP_TOKEN`, `LINEAR_API_KEY` | intake channels (each optional) |
-| `TELEGRAM_ALLOWED_CHATS`, `SLACK_ALLOWED_USERS` | authorized chat/user IDs; empty denies task creation, `*` explicitly allows all |
+| `TELEGRAM_ALLOWED_CHATS`, `SLACK_ALLOWED_USERS` | authorized chat/user IDs; empty denies task creation, `*` allows all |
 | `TASK_BUDGET_USD`, `DAILY_BUDGET_USD` | cost guardrails (0 = unlimited) |
 | `REQUIRE_APPROVAL` | hold every task for human review before push/PR |
-| `SECRETS_KEY` | enables UI-entered [per-repo secrets](#per-repo-secrets-for-setuptests-that-need-credentials), encrypted at rest |
+| `SECRETS_KEY` | enables UI-entered per-repo secrets, encrypted at rest |
+| `SANDBOX_DEFAULT`, `SANDBOX_IMAGE`, `SANDBOX_NETWORK`, `SANDBOX_IDLE_HOURS` | sandbox defaults (on; `buildpack-deps:bookworm`; `bridge`; reused for 7 idle days) |
 | `MAX_CONCURRENT_TASKS`, `TASK_TIMEOUT_SECONDS`, `WORKSPACE_RETENTION` | runtime tuning |
 
-### Agents & models — `config/agents.yaml` (or UI → Agents)
+**Agents — `config/agents.yaml`** (or UI → Agents): pick the orchestrator and per-subagent models/effort, plus optional `mcp_servers:` (extra tools for the orchestrator) and `pricing:` overrides.
 
 ```yaml
 orchestrator:
   model: openai:gpt-5.4
-  effort: medium            # low | medium | high — reasoning depth per role
+  effort: medium
 subagents:
-  explorer:
-    model: anthropic:claude-haiku-4-5-20251001
-  coder:
-    model: google_genai:gemini-2.5-pro     # mix providers freely
-  reviewer:
-    model: openai:o4-mini
+  explorer:  { model: anthropic:claude-haiku-4-5-20251001 }
+  coder:     { model: google_genai:gemini-2.5-pro }   # mix providers freely
+  reviewer:  { model: openai:o4-mini }
 ```
 
-Providers: `anthropic:*`, `google_genai:*`, `openai:*`. Effort maps to each provider's native knob (OpenAI `reasoning_effort`, Anthropic `effort`, Gemini `thinking_level`). Subagent descriptions and system prompts are also configurable, as are extra **MCP servers** (`mcp_servers:`) whose tools are handed to the orchestrator, and **pricing overrides** (`pricing:`) when provider prices drift.
-
-### Codebases — `config/repos.yaml` (or UI → Codebases)
+**Codebases — `config/repos.yaml`** (or UI → Codebases): the `description` powers automatic task→repo routing; `test` is how the agent verifies its work.
 
 ```yaml
 repos:
@@ -219,83 +121,23 @@ repos:
     description: "Python FastAPI monolith serving the public API"
     setup: "uv sync"
     test: "uv run pytest -x -q"
-    context:
-      - docs/architecture.md
+    context: [docs/architecture.md]
 ```
 
-The `description` powers automatic task→repo routing; `test` is how the agent verifies its work.
-
-### Per-repo secrets (for setup/tests that need credentials)
-
-Some repos need credentials — a `DATABASE_URL`, a package-registry token — to run setup or tests. There are two ways to provide a value, and you can mix them per repo:
-
-**1. Enter the value in the UI (encrypted at rest).** In **Codebases → Secrets**, add `DATABASE_URL=postgres://…`. The value is encrypted with `SECRETS_KEY` and stored in `data/secrets.enc`; `repos.yaml` records only that the secret is `store`-backed, and the API never returns the value. Requires `SECRETS_KEY` in the server environment:
-
-```bash
-# .env  — any high-entropy string; a data key is derived from it
-SECRETS_KEY=$(openssl rand -hex 32)
-```
-```yaml
-repos:
-  backend:
-    test: "pytest -q"
-    secrets:
-      DATABASE_URL: store        # value held encrypted in data/secrets.enc
-    sandbox_network: none        # recommended for repos with secrets
-```
-
-At-rest encryption protects backups, the data volume, and accidental commits; it does **not** defend against a host compromise that can also read `SECRETS_KEY`. Without `SECRETS_KEY`, stored secrets are unavailable and the task runs without them (fail-closed) rather than exposing anything.
-
-**2. Reference a host environment variable** (no app-side storage, no `SECRETS_KEY` needed). The value lives only in your `.env`/secret manager:
-
-```yaml
-repos:
-  backend:
-    secrets:
-      REGISTRY_TOKEN: env:NPM_TOKEN   # value comes from $NPM_TOKEN
-```
-```bash
-# .env (host)
-NPM_TOKEN=...
-```
-
-In the UI's Secrets box, a line is stored-encrypted if you type a literal (`NAME=value`) or a host reference if you type `NAME=env:HOST_VAR`. Either way:
-
-How it stays away from the model:
-
-- **Confined execution** — secrets are injected *only* into the controller-run `setup` command and the registered `test` command (which the agent triggers through its `run_tests` tool). The agent's own shell stays secret-free — `env` / `echo $DATABASE_URL` reveal nothing.
-- **Redaction everywhere** — every secret value (raw, base64, and url-encoded forms) is scrubbed from the live trace, persisted events, the PR title/body, long-term memory, channel notifications, and error messages.
-- **Safe names only** — names that could hijack execution (`PATH`, `LD_*`, `GIT_*`, shell-init vars) are rejected. Manage secrets per repo in the UI (**Codebases → Secrets**) or in `repos.yaml`.
-
-**Residual risk — read this.** Tests run the agent's *own code* with the secret in the environment, so a prompt-injected agent could in principle modify the code under test to transform a secret and emit it — the same threat model as CI secrets (a malicious workflow can exfiltrate them). It is *mitigated, not eliminated*, by the secret-free agent shell, egress control, value redaction, and the approval gate. **Attach secrets only to repos whose code and tasks you trust, prefer `sandbox_network: none`, and keep `REQUIRE_APPROVAL=true`.**
-
-## Giving the agent your company's context
-
-| Layer | How |
-|---|---|
-| Repo conventions | `AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING.md` in the repo are always read |
-| Repo docs | globs under `context:` per repo |
-| Company-wide docs | files in the `context/` directory — mounted into every workspace |
-| **Resources page** (UI → 06) | paste any URL or text → fetched, extracted, and indexed into long-term memory, scoped globally or per codebase |
-
-Each agent also receives an auto-generated **repository map** (files, line counts, top-level symbols) so it navigates instead of exploring blindly. URL ingestion uses Firecrawl when configured (JS rendering) and falls back to a built-in fetcher for static pages.
+**Per-repo secrets** (setup/tests that need credentials): reference a host env var (`secrets: { DB_URL: env:BACKEND_DB_URL }`, no app-side storage) or store a value encrypted at rest (`DB_URL: store`, needs `SECRETS_KEY`). Values are injected *only* into the controller-run `setup`/`test` commands — never the agent's own shell — and redacted (raw/base64/url-encoded) from every output sink. Residual risk: tests run the repo's own code with the secret in the environment, so attach secrets only to repos you trust, prefer `sandbox_network: none`, and keep `REQUIRE_APPROVAL=true`.
 
 ## How a task runs
 
-1. **Resolve** the target codebase (explicit, or model-routed by repo descriptions)
-2. **Clone** into an isolated workspace on branch `agent/<id>-<slug>`; start (or reuse) the repo's sandbox container and run the repo's setup command in it, if one is registered — otherwise the agent installs what it needs on the fly; build junk (`__pycache__`, `node_modules`, …) is excluded from git at the workspace level
-3. **Recall** — search long-term memory for conventions and prior learnings about this codebase
-4. **Plan & implement** — todo-list planning, delegation to subagents, real shell + filesystem scoped to the workspace
-5. **Test** until green with the repo's test command
-6. **Review** — the reviewer subagent audits the final diff
-7. **Ship** — commit, push, open the PR. With `REQUIRE_APPROVAL=true` the task instead parks as *awaiting approval* with the diff in the UI for one-click ship/reject
-8. **Record & report** — durable learnings and the task outcome are saved to memory; the result (with PR link) is posted back to the source channel
+1. **Resolve** the target codebase (explicit, or model-routed by repo descriptions).
+2. **Clone** into an isolated workspace on branch `agent/<id>-<slug>`; start (or reuse) the repo's sandbox container and run its setup command — otherwise the agent installs what it needs on the fly.
+3. **Recall** — search long-term memory for conventions and prior learnings about this codebase.
+4. **Plan & implement** — todo-list planning, delegation to subagents, real shell + filesystem scoped to the workspace.
+5. **Test** until green with the repo's test command.
+6. **Review** — the reviewer subagent audits the final diff.
+7. **Ship** — commit, push, open the PR. With `REQUIRE_APPROVAL=true` the task instead parks as *awaiting approval* with the diff in the UI for one-click ship/reject.
+8. **Record & report** — durable learnings and the outcome are saved to memory; the result (with PR link) is posted back to the source channel.
 
-Need changes after human review? Hit **revise** on a completed task (or `POST /api/tasks` with `parent_id`): the agent continues on the same branch with your feedback, and the existing PR updates in place. Tasks that are impossible or underspecified finish *without* a PR and explain what's blocking.
-
-## Cost budgets & spend tracking
-
-Every agent and chat message is priced against a built-in per-model table (override under `pricing:`), including cache-read/write multipliers. Per-task budgets abort runs at the cap (with an 80% warning event); the daily budget pauses the queue and blocks chat until midnight UTC. The UI shows per-task cost live, per-reply chat cost, and today's total in the sidebar. Unknown models are tracked by tokens, priced $0, and flagged — never silently guessed.
+Steer a running task at any time (UI steer bar or `POST /api/tasks/{id}/steer`), and **revise** a completed task to continue on the same branch — the existing PR updates in place. `GITHUB_REVIEW_POLLING=true` auto-queues revisions for review comments from repository owners, members, and collaborators.
 
 ## HTTP API
 
@@ -304,32 +146,13 @@ The UI is a thin client over a plain REST API:
 ```
 GET  /api/health             GET  /api/stats              GET  /api/models
 GET  /api/tasks              POST /api/tasks              {title, description, repo?, model?, budget_usd?, parent_id?}
-GET  /api/tasks/{id}         POST /api/tasks/{id}/cancel
+GET  /api/tasks/{id}         POST /api/tasks/{id}/cancel  POST /api/tasks/{id}/steer
 POST /api/tasks/{id}/approve POST /api/tasks/{id}/reject
 GET  /api/tasks/{id}/events  GET  /api/tasks/{id}/stream  (SSE)
 GET  /api/stream (SSE)       GET/POST/DELETE /api/repos
 GET/PUT /api/config/agents   POST /api/chat               DELETE /api/chat/{id}
 GET/POST/DELETE /api/resources                            POST /webhooks/linear
 ```
-
-## Security
-
-Defense in depth, each layer independently configurable:
-
-- **API auth** — every non-loopback bind requires `AUTH_TOKEN`; otherwise startup fails. Every `/api/*` request and SSE stream then requires the bearer token (header, or `?token=` for EventSource). Health and the HMAC-verified Linear webhook stay open; the UI prompts for the token and remembers it for the session. Still front production with TLS.
-- **Per-repo container sandbox (on by default)** — each task's shell runs in its repo's Docker container with only that repo's workspaces bind-mounted: arbitrary build/test commands and untrusted repo code can't reach the host filesystem or other repos' workspaces. Environments are **zero-config**: the container starts from a generic, language-agnostic Debian build image (`buildpack-deps:bookworm`) and the agent installs whatever toolchain and dependencies the repo needs; the container is **reused across tasks** (reaped after 7 idle days, `SANDBOX_IDLE_HOURS`), so installs and caches persist instead of repeating. Tune per repo or globally: pin a stack image (`sandbox_image` / `SANDBOX_IMAGE`), cut egress for untrusted code (`sandbox_network: none` / `SANDBOX_NETWORK=none` — self-bootstrapping then needs a pinned image or `setup`), or opt out entirely (`sandbox: false` / `SANDBOX_DEFAULT=false` to run on the host). If sandboxing applies but Docker is unavailable, the task **fails** rather than silently running on the host. (Mount `/var/run/docker.sock` into the devagent container for the compose deployment.)
-- **Prompt-injection resistance** — the orchestrator treats all repository content, documents, web pages, and memory entries as untrusted *data*, never instructions; operator guidance arrives only through the steering channel.
-- **Sanitized shell env** — API keys are never visible to the agent's shell; git credentials use process-scoped ephemeral config, never written to disk.
-- **Per-repo secrets, kept from the model** — repos can reference host env vars (`secrets: {NAME: env:HOST_VAR}`) for setup/tests; values are injected only into controller-run commands (never the agent's shell) and redacted (raw/base64/url-encoded) from every output sink. See [Per-repo secrets](#per-repo-secrets-for-setuptests-that-need-credentials) for the model and its residual risk.
-- **Trusted Git shipping** — controller commits, diffs, and pushes use protected Git metadata outside sandbox mounts, with hooks disabled, a minimal environment, exact-URL credentials, and trusted-host checks.
-- **Approval gate** — global `REQUIRE_APPROVAL=true` or per-repo `approval: required` holds work for human review before any push; `approval: auto` lets trusted repos flow.
-- Telegram and Slack deny task creation until `TELEGRAM_ALLOWED_CHATS` and `SLACK_ALLOWED_USERS` are set; use `*` only for an intentional allow-all. GitHub auto-revisions accept comments only from owners, members, and collaborators. Set `LINEAR_WEBHOOK_SECRET` if you expose that webhook.
-
-## Human-in-the-loop & the review loop
-
-- **Mid-task steering** — send an instruction to a running task (UI steer bar or `POST /api/tasks/{id}/steer`); the agent picks it up at its next checkpoint (always before opening the PR).
-- **Manual revisions** — **revise** a completed task to continue on the same branch with your feedback; the existing PR updates in place.
-- **Automatic review loop** — `GITHUB_REVIEW_POLLING=true` watches the PRs devagent opened and auto-queues revisions only for comments from repository owners, members, or collaborators.
 
 ## Development
 
@@ -339,4 +162,4 @@ uv run pytest
 uv run sde-deepagent
 ```
 
-Layout: `src/sde-deepagent/` — `agent_factory.py` (deepagents wiring) · `runner.py` (task pipeline) · `worker.py` (queue + budgets) · `gitops.py` (git/PR) · `memory.py` (Supermemory client) · `chat.py` (task-history assistant) · `pricing.py` (cost tracking) · `intake/` (telegram/slack/linear) · `server.py` (API + SSE) · `ui/` (static SPA, no build step).
+Layout: `src/sde_deepagent/` — `agent_factory.py` (deepagents wiring) · `runner.py` (task pipeline) · `worker.py` (queue + budgets) · `gitops.py` (git/PR) · `sandbox.py` (container sandbox) · `memory.py` (Supermemory client) · `chat.py` (task-history assistant) · `pricing.py` (cost tracking) · `intake/` (telegram/slack/linear) · `server.py` (API + SSE) · `ui/` (static SPA, no build step).
