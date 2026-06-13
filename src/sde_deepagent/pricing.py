@@ -8,8 +8,13 @@ and flagged, so budget enforcement never silently miscounts a priced model.
 
 from __future__ import annotations
 
+import datetime as dt
 import logging
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .db import Database
 
 logger = logging.getLogger(__name__)
 
@@ -86,9 +91,18 @@ def _cache_multipliers(model: str) -> dict[str, float]:
 
 
 class BudgetExceeded(RuntimeError):
+    kind = "task"
+
     def __init__(self, spent: float, limit: float):
         self.spent, self.limit = spent, limit
-        super().__init__(f"task budget exceeded: ${spent:.4f} spent, limit ${limit:.2f}")
+        super().__init__(f"{self.kind} budget exceeded: ${spent:.4f} spent, limit ${limit:.2f}")
+
+
+class DailyBudgetExceeded(BudgetExceeded):
+    """Raised when the account-wide daily cap is reached mid-task, so the run
+    aborts instead of letting cumulative spend drift past the ceiling."""
+
+    kind = "daily"
 
 
 @dataclass
@@ -142,3 +156,42 @@ class CostTracker:
         if self.unpriced_models:
             out["unpriced_models"] = sorted(self.unpriced_models)
         return out
+
+
+def utc_midnight_ts() -> float:
+    """Start of the current UTC day, as a POSIX timestamp."""
+    now = dt.datetime.now(dt.timezone.utc)
+    return now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+
+
+class DailyBudget:
+    """Account-wide daily LLM-spend cap, enforced as a HARD ceiling.
+
+    Persisted spend (``db.spend_since``) only reflects *finished* work — an
+    in-flight task hasn't written its cost yet. Gating solely on persisted spend
+    lets several concurrent runs each pass the check and collectively overshoot
+    the cap. This accountant also sums the live, not-yet-persisted cost of every
+    running task, so both the dispatcher's launch gate and the runner's
+    mid-stream check see the true total. One instance is shared by the worker
+    and the runner.
+    """
+
+    def __init__(self, db: Database, limit_usd: float) -> None:
+        self.db = db
+        self.limit_usd = limit_usd
+        self._live: dict[str, CostTracker] = {}
+
+    def track(self, task_id: str, tracker: CostTracker) -> None:
+        """Register a running task's tracker so its spend counts immediately."""
+        self._live[task_id] = tracker
+
+    def untrack(self, task_id: str) -> None:
+        self._live.pop(task_id, None)
+
+    def live_usd(self) -> float:
+        """Unpersisted spend of every in-flight task."""
+        return sum(t.cost_usd for t in self._live.values())
+
+    async def spent_usd(self) -> float:
+        """Persisted spend today + live spend of all in-flight tasks."""
+        return await self.db.spend_since(utc_midnight_ts()) + self.live_usd()

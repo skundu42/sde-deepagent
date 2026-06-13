@@ -62,6 +62,56 @@ async def test_webhook_exempt(auth_client):
     assert r.status_code != 401
 
 
+class _StubLinear:
+    def __init__(self):
+        self.calls = []
+
+    async def handle_webhook(self, payload):
+        self.calls.append(payload)
+
+
+async def test_linear_webhook_fails_closed_without_secret(temp_env):
+    # configured Linear intake but no webhook secret: the endpoint is exempt from
+    # AUTH_TOKEN, so it must REFUSE (not silently accept) unauthenticated posts
+    app = create_app()
+    async with httpx.ASGITransport(app=app) as transport:
+        async with app.router.lifespan_context(app):
+            stub = _StubLinear()
+            app.state.linear = stub
+            app.state.settings.linear_webhook_secret = None
+            async with httpx.AsyncClient(transport=transport,
+                                         base_url="http://test") as client:
+                r = await client.post("/webhooks/linear", json={"action": "create"})
+                assert r.status_code == 403
+                assert stub.calls == []  # never reached the handler
+
+
+async def test_linear_webhook_requires_valid_signature(temp_env):
+    import hashlib
+    import hmac
+    import json
+
+    app = create_app()
+    async with httpx.ASGITransport(app=app) as transport:
+        async with app.router.lifespan_context(app):
+            stub = _StubLinear()
+            app.state.linear = stub
+            app.state.settings.linear_webhook_secret = "whsec"
+            async with httpx.AsyncClient(transport=transport,
+                                         base_url="http://test") as client:
+                body = json.dumps({"x": 1}).encode()
+                bad = await client.post("/webhooks/linear", content=body,
+                                        headers={"linear-signature": "deadbeef"})
+                assert bad.status_code == 401
+                assert stub.calls == []
+
+                good_sig = hmac.new(b"whsec", body, hashlib.sha256).hexdigest()
+                ok = await client.post("/webhooks/linear", content=body,
+                                       headers={"linear-signature": good_sig})
+                assert ok.status_code == 200
+                assert stub.calls == [{"x": 1}]
+
+
 async def test_no_auth_when_unset(temp_env):
     # default temp_env has AUTH_TOKEN="" -> middleware not installed
     app = create_app()

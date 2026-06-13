@@ -5,11 +5,12 @@ spend reaches it) and notifies intake channels when tasks finish."""
 from __future__ import annotations
 
 import asyncio
-import datetime as dt
 import logging
 from typing import Awaitable, Callable
 
 from .db import Database, Task
+from .pricing import DailyBudget
+from .pricing import utc_midnight_ts as _utc_midnight_ts  # noqa: F401 — re-export for callers/tests
 from .runner import TaskRunner
 from .settings import Settings
 
@@ -18,18 +19,19 @@ logger = logging.getLogger(__name__)
 Notifier = Callable[[Task], Awaitable[None]]
 
 
-def _utc_midnight_ts() -> float:
-    now = dt.datetime.now(dt.timezone.utc)
-    return now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
-
-
 class Worker:
     def __init__(self, db: Database, runner: TaskRunner, max_concurrent: int = 2,
-                 settings: Settings | None = None):
+                 settings: Settings | None = None,
+                 daily_budget: DailyBudget | None = None):
         self.db = db
         self.runner = runner
         self.max_concurrent = max_concurrent
         self.settings = settings
+        # Share one accountant with the runner so the launch gate and the
+        # runner's mid-stream check agree on the true (persisted + in-flight)
+        # daily spend. Falls back to a self-owned one for standalone use/tests.
+        self.daily_budget = daily_budget or DailyBudget(
+            db, settings.daily_budget_usd if settings else 0.0)
         self.budget_paused = False
         self.running: dict[str, asyncio.Task] = {}
         self.notifiers: list[Notifier] = []
@@ -60,10 +62,12 @@ class Worker:
         return False
 
     async def _daily_budget_ok(self) -> bool:
-        limit = self.settings.daily_budget_usd if self.settings else 0.0
+        limit = self.daily_budget.limit_usd
         if limit <= 0:
             return True
-        spend = await self.db.spend_since(_utc_midnight_ts())
+        # includes in-flight tasks' unpersisted spend — a hard cap, not a gate
+        # that several concurrent launches can all slip past
+        spend = await self.daily_budget.spent_usd()
         if spend >= limit:
             if not self.budget_paused:
                 logger.warning(

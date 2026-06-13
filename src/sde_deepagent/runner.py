@@ -25,7 +25,7 @@ from .gitops import (
 )
 from .llm import build_model
 from .memory import memory_from_settings, repo_tag
-from .pricing import BudgetExceeded, CostTracker
+from .pricing import BudgetExceeded, CostTracker, DailyBudget, DailyBudgetExceeded
 from .prompts import REPO_RESOLVER_PROMPT, REVISION_TASK_TEMPLATE
 from .settings import Settings
 
@@ -36,13 +36,17 @@ TRUNCATE_RESULT = 2500
 
 
 class TaskRunner:
-    def __init__(self, db: Database, bus: EventBus, cfg: ConfigStore, settings: Settings):
+    def __init__(self, db: Database, bus: EventBus, cfg: ConfigStore, settings: Settings,
+                 daily_budget: DailyBudget | None = None):
         self.mailboxes: dict[str, list[str]] = {}  # task_id -> pending operator messages
         self.db = db
         self.bus = bus
         self.cfg = cfg
         self.settings = settings
         self.memory = memory_from_settings(settings)
+        # shared with the worker so launch-gating and mid-stream enforcement see
+        # the same (persisted + in-flight) daily spend
+        self.daily_budget = daily_budget or DailyBudget(db, settings.daily_budget_usd)
 
     async def emit(self, task_id: str, kind: str, content: dict[str, Any],
                    agent: str = "orchestrator") -> None:
@@ -167,6 +171,7 @@ class TaskRunner:
                 resp_meta = getattr(msg, "response_metadata", None) or {}
                 tracker.add_usage(meta, resp_meta.get("model_name"))
                 await self._enforce_budget(task, tracker, budget_usd)
+                await self._enforce_daily_budget()
             text = self._text_of(msg)
             if text.strip():
                 await self.emit(task.id, "message", {"text": text}, agent_name)
@@ -199,6 +204,19 @@ class TaskRunner:
             await self.emit(task.id, "log", {
                 "text": f"budget warning: ${tracker.cost_usd:.2f} of "
                         f"${budget_usd:.2f} used (≥80%)"})
+
+    async def _enforce_daily_budget(self) -> None:
+        """Hard daily cap: abort the instant cumulative spend (persisted + every
+        in-flight task) reaches the limit. Together with the dispatcher's launch
+        gate this guarantees no task begins new LLM work past the ceiling — the
+        only unavoidable slack is the single response already in flight when the
+        line is crossed (its tokens are billed before any code can react)."""
+        limit = self.daily_budget.limit_usd
+        if limit <= 0:
+            return
+        spent = await self.daily_budget.spent_usd()
+        if spent >= limit:
+            raise DailyBudgetExceeded(spent, limit)
 
     async def _persist_usage(self, task: Task, tracker: CostTracker | None) -> None:
         if tracker is None:
@@ -403,6 +421,9 @@ class TaskRunner:
                 default_model=task.model or agents_cfg.orchestrator_model,
                 overrides=agents_cfg.pricing,
             )
+            # count this task's spend toward the daily cap while it runs, before
+            # its cost is persisted at the end of the run
+            self.daily_budget.track(task.id, tracker)
             budget = task.budget_usd or self.settings.task_budget_usd
 
             async def on_tool_event(kind: str, content: dict) -> None:
@@ -483,6 +504,7 @@ class TaskRunner:
             await self.emit(task.id, "status", {"status": "failed", "error": task.error[:1000]})
         finally:
             self.mailboxes.pop(task.id, None)
+            self.daily_budget.untrack(task.id)  # cost is now persisted in the DB
             if sandboxed:
                 # the container stays up for reuse; restamp its idle clock so
                 # the reaper counts the 24h TTL from this task's end

@@ -26,6 +26,7 @@ from .intake.linear import LinearIntake
 from .intake.slack import SlackIntake
 from .intake.telegram import TelegramIntake
 from .memory import GLOBAL_TAG, memory_from_settings, repo_tag
+from .pricing import DailyBudget
 from .runner import TaskRunner
 from .settings import get_settings, validate_control_plane_security
 from .worker import Worker
@@ -92,9 +93,12 @@ async def lifespan(app: FastAPI):
     await db.connect()
     bus = EventBus()
     cfg = ConfigStore(settings.config_dir)
-    runner = TaskRunner(db, bus, cfg, settings)
+    # one daily-budget accountant shared by the runner (mid-stream enforcement)
+    # and the worker (launch gate) so the cap is a hard ceiling, not a soft gate
+    daily_budget = DailyBudget(db, settings.daily_budget_usd)
+    runner = TaskRunner(db, bus, cfg, settings, daily_budget=daily_budget)
     worker = Worker(db, runner, max_concurrent=settings.max_concurrent_tasks,
-                    settings=settings)
+                    settings=settings, daily_budget=daily_budget)
 
     intakes: list[Any] = []
     if settings.telegram_bot_token:
@@ -105,6 +109,9 @@ async def lifespan(app: FastAPI):
     if settings.linear_api_key:
         linear = LinearIntake(settings, db)
         intakes.append(linear)
+        if not settings.linear_webhook_secret:
+            logger.info("linear: polling enabled; the /webhooks/linear endpoint "
+                        "stays disabled (403) until LINEAR_WEBHOOK_SECRET is set")
 
     for intake in intakes:
         intake.start()
@@ -188,8 +195,9 @@ def create_app() -> FastAPI:
 
         s = request.app.state.settings
         out = await request.app.state.db.stats()
+        # include in-flight task spend so the figure matches the enforced cap
         out["spend_today_usd"] = round(
-            await request.app.state.db.spend_since(_utc_midnight_ts()), 4)
+            await request.app.state.worker.daily_budget.spent_usd(), 4)
         out["spend_today_chat_usd"] = round(
             await request.app.state.db.chat_spend_since(_utc_midnight_ts()), 4)
         out["daily_budget_usd"] = s.daily_budget_usd
@@ -391,15 +399,13 @@ def create_app() -> FastAPI:
 
     @app.post("/api/chat")
     async def chat(request: Request, body: ChatMessage):
-        from .worker import _utc_midnight_ts
-
-        s = request.app.state.settings
-        if s.daily_budget_usd > 0:
-            spend = await request.app.state.db.spend_since(_utc_midnight_ts())
-            if spend >= s.daily_budget_usd:
+        budget = request.app.state.worker.daily_budget
+        if budget.limit_usd > 0:
+            spend = await budget.spent_usd()  # persisted + in-flight task spend
+            if spend >= budget.limit_usd:
                 raise HTTPException(
                     429, f"daily budget reached (${spend:.2f} of "
-                         f"${s.daily_budget_usd:.2f}) — chat resumes at UTC midnight")
+                         f"${budget.limit_usd:.2f}) — chat resumes at UTC midnight")
         try:
             return await request.app.state.chat.ask(body.message, body.session_id)
         except Exception as e:  # noqa: BLE001 — surface model/tool errors to the UI
@@ -557,13 +563,18 @@ def create_app() -> FastAPI:
         linear: LinearIntake | None = request.app.state.linear
         if not linear:
             raise HTTPException(404, "linear intake not configured")
-        raw = await request.body()
         secret = request.app.state.settings.linear_webhook_secret
-        if secret:
-            sig = request.headers.get("linear-signature", "")
-            expected = hmac.new(secret.encode(), raw, hashlib.sha256).hexdigest()
-            if not hmac.compare_digest(sig, expected):
-                raise HTTPException(401, "bad signature")
+        if not secret:
+            # Fail closed: this route is exempt from AUTH_TOKEN (it carries its
+            # own HMAC), so without a secret we cannot authenticate the caller.
+            # Refuse rather than accept unauthenticated task creation.
+            raise HTTPException(
+                403, "linear webhook disabled: set LINEAR_WEBHOOK_SECRET to enable it")
+        raw = await request.body()
+        sig = request.headers.get("linear-signature", "")
+        expected = hmac.new(secret.encode(), raw, hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(sig, expected):
+            raise HTTPException(401, "bad signature")
         await linear.handle_webhook(json.loads(raw))
         return {"ok": True}
 

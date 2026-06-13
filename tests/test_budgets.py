@@ -8,7 +8,12 @@ import aiosqlite
 import pytest
 
 from sde_deepagent.db import Database
-from sde_deepagent.pricing import BudgetExceeded, CostTracker
+from sde_deepagent.pricing import (
+    BudgetExceeded,
+    CostTracker,
+    DailyBudget,
+    DailyBudgetExceeded,
+)
 from sde_deepagent.worker import Worker, _utc_midnight_ts
 
 # ---- runner-level per-task budget check ----
@@ -89,6 +94,65 @@ async def test_daily_budget_pauses_pickup(db):
     finally:
         await worker.stop()
     assert (await db.get_task(queued.id)).status == "queued"
+
+
+# ---- daily budget is a HARD cap: in-flight spend counts immediately ----
+
+async def test_daily_budget_counts_inflight_spend(db):
+    # nothing persisted yet, but a running task is already over the cap
+    budget = DailyBudget(db, 5.0)
+    assert await budget.spent_usd() == pytest.approx(0.0)
+
+    tracker = CostTracker(default_model="claude-sonnet-4-6")
+    tracker.cost_usd = 6.0
+    budget.track("running", tracker)
+    # spend reflects live in-flight cost before it is ever persisted
+    assert budget.live_usd() == pytest.approx(6.0)
+    assert await budget.spent_usd() == pytest.approx(6.0)
+
+    budget.untrack("running")
+    assert await budget.spent_usd() == pytest.approx(0.0)
+
+
+async def test_daily_budget_gate_counts_inflight(db):
+    # nothing finished today (no persisted cost), but one running task has
+    # already blown the cap — the gate must still hold queued work back
+    queued = await db.create_task("waiting", "d")
+    budget = DailyBudget(db, 5.0)
+    inflight = CostTracker(default_model="claude-sonnet-4-6")
+    inflight.cost_usd = 6.0
+    budget.track("inflight", inflight)
+
+    runner = NeverRunner()
+    worker = Worker(db, runner, max_concurrent=2, settings=_BudgetSettings(),
+                    daily_budget=budget)
+    worker.start()
+    try:
+        await asyncio.sleep(1.5)
+        assert runner.calls == []  # held back on in-flight spend alone
+        assert worker.budget_paused is True
+    finally:
+        await worker.stop()
+    assert (await db.get_task(queued.id)).status == "queued"
+
+
+async def test_runner_aborts_midstream_on_daily_cap(db):
+    # the runner's per-response check trips DailyBudgetExceeded so an in-flight
+    # task cannot keep spending past the account-wide ceiling
+    from sde_deepagent.runner import TaskRunner
+
+    runner = TaskRunner.__new__(TaskRunner)  # only daily_budget is needed here
+    runner.daily_budget = DailyBudget(db, 5.0)
+    tracker = CostTracker(default_model="claude-sonnet-4-6")
+    tracker.cost_usd = 6.0
+    runner.daily_budget.track("t1", tracker)
+
+    with pytest.raises(DailyBudgetExceeded):
+        await runner._enforce_daily_budget()
+
+    # 0 / unset == unlimited: never aborts
+    runner.daily_budget.limit_usd = 0.0
+    await runner._enforce_daily_budget()
 
 
 async def test_spend_since_only_counts_window(db):
