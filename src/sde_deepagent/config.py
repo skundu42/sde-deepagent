@@ -13,6 +13,8 @@ from typing import Any
 
 import yaml
 
+from .secrets import validate_secret_spec
+
 logger = logging.getLogger(__name__)
 
 
@@ -43,6 +45,21 @@ def _safe_context(name: str, patterns: list[str]) -> list[str]:
             safe.append(p)
         else:
             logger.warning("repo %s: ignoring unsafe context pattern %r", name, p)
+    return safe
+
+
+def _safe_secrets(name: str, secrets: Any) -> dict[str, str]:
+    """Drop (and log) any invalid/reserved secret references from a repo spec."""
+    if not isinstance(secrets, dict):
+        return {}
+    safe: dict[str, str] = {}
+    for key, ref in secrets.items():
+        try:
+            validate_secret_spec({key: ref})
+        except ValueError as e:
+            logger.warning("repo %s: ignoring invalid secret %r (%s)", name, key, e)
+        else:
+            safe[str(key)] = str(ref)
     return safe
 
 DEFAULT_AGENTS_YAML = """\
@@ -127,6 +144,9 @@ class RepoConfig:
     sandbox_image: str | None = None     # image for the sandbox (else server default)
     sandbox_network: str | None = None   # none | bridge (egress policy in the sandbox)
     approval: str | None = None          # auto | required (else server require_approval)
+    # secret NAME -> "env:HOST_VAR" reference; values live in the host env, never
+    # here. Injected into controller-run setup/test only, never the agent shell.
+    secrets: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -140,6 +160,8 @@ class RepoConfig:
             "sandbox_image": self.sandbox_image,
             "sandbox_network": self.sandbox_network,
             "approval": self.approval,
+            # references only (e.g. "env:BACKEND_DB_URL") — safe to persist/serve
+            "secrets": self.secrets,
         }
 
 
@@ -236,6 +258,7 @@ class ConfigStore:
                 sandbox_image=spec.get("sandbox_image"),
                 sandbox_network=spec.get("sandbox_network"),
                 approval=spec.get("approval"),
+                secrets=_safe_secrets(name, spec.get("secrets") or {}),
             )
         return out
 

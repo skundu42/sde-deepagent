@@ -61,6 +61,9 @@ class Settings(BaseSettings):
     host: str = "127.0.0.1"
     port: int = 8321
     auth_token: str | None = None  # if set, API + SSE require this bearer token
+    # master key for the encrypted per-repo secret store (any high-entropy
+    # string; a data key is derived from it). Unset = encrypted secrets disabled.
+    secrets_key: str | None = None
     data_dir: Path = Path("data")
     config_dir: Path = Path("config")
     context_dir: Path = Path("context")
@@ -108,6 +111,11 @@ class Settings(BaseSettings):
     def sandbox_state_path(self) -> Path:
         """Last-use timestamps for sandbox containers (drives the idle reaper)."""
         return self.data_dir / "sandbox-usage.json"
+
+    @property
+    def secrets_store_path(self) -> Path:
+        """Encrypted per-repo secret values (Fernet tokens; needs SECRETS_KEY)."""
+        return self.data_dir / "secrets.enc"
 
     def telegram_allowed_chat_ids(self) -> set[int]:
         return {int(c) for c in self.telegram_allowed_chats.split(",") if c.strip()}

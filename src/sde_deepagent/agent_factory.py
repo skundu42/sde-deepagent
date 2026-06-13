@@ -3,12 +3,13 @@ a shell/filesystem backend rooted at the task's repo clone."""
 
 from __future__ import annotations
 
+import asyncio
 import os
+import re
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 from deepagents import create_deep_agent
-from deepagents.backends import LocalShellBackend
 from langchain_core.tools import tool
 
 from .config import AgentsConfig
@@ -20,6 +21,7 @@ from .gitops import (
     create_pull_request,
     has_changes,
     push_branch,
+    run_cmd,
 )
 from .llm import EFFORT_LEVELS, build_model, normalize_model_id
 from .mcp_tools import load_mcp_tools
@@ -34,6 +36,7 @@ from .prompts import (
     SHIP_APPROVAL,
     SHIP_NORMAL,
 )
+from .secrets import Redactor
 from .settings import Settings
 
 # Env passed to agent shell commands: enough to build/test, without leaking
@@ -58,6 +61,7 @@ def make_pr_tool(
     settings: Settings,
     result: dict[str, str | None],
     on_event: Callable[[str, dict], Awaitable[None]] | None = None,
+    redact: Callable[[str], str] | None = None,
 ):
     @tool
     async def open_pull_request(title: str, body: str) -> str:
@@ -65,6 +69,8 @@ def make_pr_tool(
         branch. Call this exactly once, after all work is committed. `title` is
         the PR title; `body` is a markdown description of what changed, why,
         and how it was tested."""
+        if redact:  # never let a secret value reach the remote / approval record
+            title, body = redact(title), redact(body)
         if await has_changes(ws):
             await commit_all(ws, f"chore: remaining work for {title[:60]}")
         if settings.require_approval:
@@ -89,7 +95,74 @@ def make_pr_tool(
     return open_pull_request
 
 
-def make_memory_tools(memory: Memory, repo_name: str, task_id: str):
+_SAFE_SELECTOR_RE = re.compile(r"^[\w./:= -]*$")
+
+
+def _safe_selector(selector: str) -> str:
+    """Allow only a conservative subset (no shell metacharacters) so an agent's
+    test selector cannot break out of the registered command's `bash -lc`."""
+    s = (selector or "").strip()
+    return s if _SAFE_SELECTOR_RE.match(s) else ""
+
+
+def make_run_tests_tool(
+    *,
+    test_cmd: str | None,
+    ws: Workspace,
+    sandbox_container: str | None,
+    sandbox_workdir: str | None,
+    secrets: dict[str, str] | None,
+    redact: Callable[[str], str] | None,
+    on_event: Callable[[str, dict], Awaitable[None]] | None,
+):
+    """Controller-run test execution: runs the repo's REGISTERED test command
+    with its configured secrets injected, then returns redacted output. The
+    agent never gets a shell with the secrets — this tool is the only path that
+    runs the registered tests with them."""
+
+    @tool
+    async def run_tests(selector: str = "") -> str:
+        """Run the repository's REGISTERED test command to verify your changes.
+        It runs with this repo's configured secrets injected — you cannot see
+        their values, and they are redacted from the output. Optionally pass
+        `selector` to narrow the run (e.g. a test path or `-k expr`); it is
+        appended to the registered command. This is the ONLY way to run the
+        project's tests with their secrets — do NOT run the test command
+        directly in your shell. Returns pass/fail and the (redacted) output."""
+        if not test_cmd:
+            return ("No test command is registered for this repo, so there are no "
+                    "secret-backed tests to run. If the project has tests, ask the "
+                    "operator to register the test command for this codebase.")
+        sel = _safe_selector(selector)
+        note = "\n(note: selector ignored — unsafe characters)" if (
+            selector and not sel) else ""
+        cmd = f"{test_cmd} {sel}".strip() if sel else test_cmd
+        if sandbox_container:
+            from .sandbox import exec_in_container
+            resp = await asyncio.to_thread(
+                exec_in_container, sandbox_container, cmd,
+                timeout=1200, workdir=sandbox_workdir or "/workspaces",
+                secrets=secrets or None)
+            code, out = resp.exit_code, resp.output
+        else:
+            code, out = await run_cmd(
+                ["bash", "-lc", cmd], cwd=ws.path, timeout=1200,
+                env={**_shell_env(), **(secrets or {})})
+        if redact:
+            out = redact(out)
+        if len(out) > 8000:
+            out = out[:8000] + "\n\n... output truncated."
+        if on_event:
+            await on_event("tool_result",
+                           {"name": "run_tests", "output": out, "exit_code": code})
+        status = "passed" if code == 0 else f"FAILED (exit {code})"
+        return f"Tests {status}.\nCommand: {cmd}{note}\n\n{out}"
+
+    return run_tests
+
+
+def make_memory_tools(memory: Memory, repo_name: str, task_id: str,
+                      redact: Callable[[str], str] | None = None):
     """search_memory (also given to subagents) and save_memory (orchestrator only)."""
     r_tag = repo_tag(repo_name)
 
@@ -117,6 +190,8 @@ def make_memory_tools(memory: Memory, repo_name: str, task_id: str):
         Never save trivia or anything obvious from a quick file read.
         `scope` is "repo" (this codebase, default) or "global" (org-wide)."""
         tag = GLOBAL_TAG if scope == "global" else r_tag
+        if redact:
+            content = redact(content)
         mem_id = await memory.add(content, tag,
                                   metadata={"task_id": task_id, "repo": repo_name,
                                             "source": "agent"})
@@ -153,33 +228,48 @@ async def build_agent(
     sandbox_workdir: str | None = None,
     sandbox_network: str | None = None,
     drain_messages: Callable[[], list[str]] | None = None,
+    secrets: dict[str, str] | None = None,
+    redactor: Redactor | None = None,
 ) -> BuiltAgent:
+    # masks any repo secret value that surfaces through the agent's own shell or
+    # file reads (its env is secret-free, but test code could write one out)
+    redact = redactor.redact if (redactor is not None and redactor.active) else None
     if sandbox_container:
         from .sandbox import DockerShellBackend
         backend = DockerShellBackend(ws.path, sandbox_container,
                                      workdir=sandbox_workdir or "/workspaces",
-                                     timeout=600, max_output_bytes=60000)
+                                     timeout=600, max_output_bytes=60000,
+                                     redact=redact)
     else:
-        backend = LocalShellBackend(
+        from .sandbox import RedactingLocalShellBackend
+        backend = RedactingLocalShellBackend(
             root_dir=ws.path,
             virtual_mode=True,
             timeout=600,
             max_output_bytes=60000,
             env=_shell_env(),
+            redact=redact,
         )
 
     result: dict[str, str | None] = {"pr_url": None, "pr_title": None,
                                      "pr_body": None}
-    tools: list = [make_pr_tool(ws, settings, result, on_event)]
+    # run_tests runs the REGISTERED test command with secrets injected by the
+    # controller; the agent and its subagents trigger it but never see the values
+    run_tests_tool = make_run_tests_tool(
+        test_cmd=ws.repo.test, ws=ws, sandbox_container=sandbox_container,
+        sandbox_workdir=sandbox_workdir, secrets=secrets, redact=redact,
+        on_event=on_event)
+    tools: list = [make_pr_tool(ws, settings, result, on_event, redact), run_tests_tool]
     if drain_messages is not None:
         tools.append(make_check_messages_tool(drain_messages))
     tools.extend(await load_mcp_tools(agents_cfg.mcp_servers))
 
     memory = memory_from_settings(settings)
-    subagent_tools: list = []
+    subagent_tools: list = [run_tests_tool]  # the tester runs the suite through it
     memory_prompt = ""
     if memory:
-        search_memory, save_memory = make_memory_tools(memory, ws.repo.name, ws.task_id)
+        search_memory, save_memory = make_memory_tools(
+            memory, ws.repo.name, ws.task_id, redact)
         tools.extend([search_memory, save_memory])
         subagent_tools.append(search_memory)  # subagents read memory; only the
         memory_prompt = MEMORY_PROMPT          # orchestrator writes it

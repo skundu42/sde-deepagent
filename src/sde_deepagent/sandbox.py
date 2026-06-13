@@ -35,6 +35,7 @@ import subprocess
 import threading
 import time
 from pathlib import Path
+from typing import Callable
 
 from deepagents.backends import LocalShellBackend
 from deepagents.backends.protocol import ExecuteResponse
@@ -276,14 +277,29 @@ class SandboxReaper:
 
 def exec_in_container(name: str, command: str, *, timeout: int,
                       workdir: str = "/workspaces",
-                      max_output_bytes: int = 60000) -> ExecuteResponse:
+                      max_output_bytes: int = 60000,
+                      secrets: dict[str, str] | None = None) -> ExecuteResponse:
     """Run a shell command inside the container, returning a deepagents
-    ExecuteResponse (same shape LocalShellBackend produces)."""
+    ExecuteResponse (same shape LocalShellBackend produces).
+
+    `secrets` (NAME->value) are forwarded into the container as environment
+    variables. Only the NAMES appear in the argv (`docker exec --env NAME`); the
+    values are passed through the docker CLI's own environment, so they never
+    land in the process list or on disk — the same ephemeral pattern gitops uses
+    for git credentials. Used only for controller-run setup/test commands, never
+    for the agent's own shell."""
+    cmd = ["docker", "exec", "-w", workdir]
+    run_env = None
+    if secrets:
+        for key in secrets:
+            cmd += ["--env", key]
+        # docker reads each `--env NAME` value from its own environment
+        run_env = {**os.environ, **secrets}
+    cmd += [name, "bash", "-lc", command]
     try:
         result = subprocess.run(
-            ["docker", "exec", "-w", workdir, name, "bash", "-lc", command],
-            capture_output=True, text=True, timeout=timeout,
-            stdin=subprocess.DEVNULL,
+            cmd, capture_output=True, text=True, timeout=timeout,
+            stdin=subprocess.DEVNULL, env=run_env,
         )
     except subprocess.TimeoutExpired:
         return ExecuteResponse(
@@ -308,24 +324,73 @@ def exec_in_container(name: str, command: str, *, timeout: int,
     return ExecuteResponse(output=output, exit_code=result.returncode, truncated=truncated)
 
 
+Redact = Callable[[str], str]
+
+
+def _redact_response(resp: ExecuteResponse, redact: Redact | None) -> ExecuteResponse:
+    if redact is None or not isinstance(getattr(resp, "output", None), str):
+        return resp
+    return ExecuteResponse(output=redact(resp.output),
+                           exit_code=resp.exit_code, truncated=resp.truncated)
+
+
+def _redact_text(text, redact: Redact | None):
+    return redact(text) if (redact is not None and isinstance(text, str)) else text
+
+
 class DockerShellBackend(LocalShellBackend):
     """LocalShellBackend whose `execute` runs inside the repo's container,
     pinned to this task's workspace subdir. Filesystem operations are
-    inherited (host-side on the mounted workspace)."""
+    inherited (host-side on the mounted workspace).
+
+    The agent's shell never receives any repo secret (only the controller-run
+    setup/test path does). `redact` masks any secret value that surfaces through
+    command output or a file read — covering, e.g., test code that writes a
+    secret to the workspace which the agent then reads back."""
 
     def __init__(self, root_dir, container: str, *, workdir: str = "/workspaces",
-                 timeout: int = 600, max_output_bytes: int = 60000) -> None:
+                 timeout: int = 600, max_output_bytes: int = 60000,
+                 redact: Redact | None = None) -> None:
         super().__init__(root_dir=root_dir, virtual_mode=True,
                          timeout=timeout, max_output_bytes=max_output_bytes)
         self._container = container
         self._workdir = workdir
+        self._redact = redact
 
     def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
         if not command or not isinstance(command, str):
             return ExecuteResponse(output="Error: Command must be a non-empty string.",
                                    exit_code=1, truncated=False)
-        return exec_in_container(
+        resp = exec_in_container(
             self._container, command,
             timeout=timeout or self._default_timeout,
             workdir=self._workdir,
             max_output_bytes=self._max_output_bytes)
+        return _redact_response(resp, self._redact)
+
+    def read(self, *args, **kwargs):
+        return _redact_text(super().read(*args, **kwargs), self._redact)
+
+    def grep(self, *args, **kwargs):
+        return _redact_text(super().grep(*args, **kwargs), self._redact)
+
+
+class RedactingLocalShellBackend(LocalShellBackend):
+    """Host-execution backend (no sandbox) that redacts secret values from
+    command output and file reads before they reach the model — the non-sandbox
+    counterpart to DockerShellBackend's redaction. The async tool entrypoints
+    (aexecute/aread/agrep) delegate to these sync methods via asyncio.to_thread,
+    so overriding the sync methods covers every path."""
+
+    def __init__(self, *args, redact: Redact | None = None, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._redact = redact
+
+    def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
+        return _redact_response(super().execute(command, timeout=timeout), self._redact)
+
+    def read(self, *args, **kwargs):
+        return _redact_text(super().read(*args, **kwargs), self._redact)
+
+    def grep(self, *args, **kwargs):
+        return _redact_text(super().grep(*args, **kwargs), self._redact)

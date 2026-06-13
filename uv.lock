@@ -1857,6 +1857,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
+    { name = "cryptography" },
     { name = "deepagents" },
     { name = "fastapi", extra = ["standard"] },
     { name = "httpx" },
@@ -1881,6 +1882,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "aiosqlite", specifier = ">=0.22.1" },
+    { name = "cryptography", specifier = ">=43" },
     { name = "deepagents", specifier = ">=0.6.8" },
     { name = "fastapi", extras = ["standard"], specifier = ">=0.136.3" },
     { name = "httpx", specifier = ">=0.28.1" },

@@ -463,6 +463,23 @@ async function renderNewTask() {
 
 /* ---------- view: repos ---------- */
 
+function parseSecretLines(text) {
+  // each line "NAME=value" (stored encrypted) or "NAME=env:HOST_VAR" (reference).
+  // refs go in the repo config; literal values are PUT to the encrypted store.
+  const refs = {}, values = {};
+  (text || "").split("\n").forEach((line) => {
+    const s = line.trim();
+    if (!s) return;
+    const i = s.indexOf("=");
+    if (i <= 0) return;
+    const name = s.slice(0, i).trim();
+    const val = s.slice(i + 1).trim();
+    if (val.startsWith("env:")) { refs[name] = val; }
+    else { refs[name] = "store"; values[name] = val; }  // literal -> encrypted store
+  });
+  return { refs, values };
+}
+
 async function renderRepos() {
   let repos = {};
   try { repos = await api("/api/repos"); } catch (e) { return toast(e.message, "err"); }
@@ -475,6 +492,8 @@ async function renderRepos() {
       ${r.setup ? `<div class="kv"><b>setup</b> ${esc(r.setup)}</div>` : ""}
       ${r.test ? `<div class="kv"><b>test</b> ${esc(r.test)}</div>` : ""}
       ${(r.context || []).length ? `<div class="kv"><b>docs</b> ${esc(r.context.join(", "))}</div>` : ""}
+      ${Object.keys(r.secrets || {}).length ? `<div class="kv"><b>secrets</b> ${Object.entries(r.secrets).map(([k, v]) =>
+        `<span class="chip">${esc(k)}${v === "store" ? " 🔒" : "=" + esc(v)} <a data-secdel="${esc(name)}|${esc(k)}" title="remove" style="cursor:pointer;opacity:.7">✕</a></span>`).join(" ")}</div>` : ""}
       ${r.sandbox || r.approval ? `<div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">
         ${r.sandbox ? `<span class="chip" style="color:var(--green);border-color:rgba(43,217,124,.4)">⊟ sandboxed${r.sandbox_network ? `:${esc(r.sandbox_network)}` : ""}</span>` : ""}
         ${r.approval === "required" ? `<span class="chip" style="color:var(--violet);border-color:rgba(180,140,255,.4)">⏸ approval</span>` : ""}
@@ -506,6 +525,8 @@ async function renderRepos() {
       </div>
       <div class="field"><label>Context docs <span style="text-transform:none">(comma-separated globs)</span></label>
         <input id="r-ctx" placeholder="docs/architecture.md, CONTRIBUTING.md"></div>
+      <div class="field"><label>Secrets <span style="text-transform:none">(one per line — NAME=value is stored encrypted; NAME=env:HOST_VAR references the server env. Injected only into setup/tests, never the agent; needs SECRETS_KEY for stored values)</span></label>
+        <textarea id="r-secrets" rows="2" placeholder="DATABASE_URL=postgres://user:pass@host/db&#10;REGISTRY_TOKEN=env:NPM_TOKEN"></textarea></div>
       <div class="field-row">
         <div class="field">
           <label>Sandbox <span style="text-transform:none">(run tasks in a container)</span></label>
@@ -538,12 +559,22 @@ async function renderRepos() {
     try { await api(`/api/repos/${b.dataset.del}`, { method: "DELETE" }); renderRepos(); }
     catch (e) { toast(e.message, "err"); }
   });
+  document.querySelectorAll("[data-secdel]").forEach((b) => b.onclick = async () => {
+    const [rname, sname] = b.dataset.secdel.split("|");
+    try {
+      await api(`/api/repos/${encodeURIComponent(rname)}/secrets/${encodeURIComponent(sname)}`,
+                { method: "DELETE" });
+      renderRepos();
+    } catch (e) { toast(e.message, "err"); }
+  });
   $("#r-submit").onclick = async () => {
+    const name = $("#r-name").value.trim();
+    const { refs, values } = parseSecretLines($("#r-secrets").value);
     try {
       await api("/api/repos", {
         method: "POST",
         body: JSON.stringify({
-          name: $("#r-name").value.trim(),
+          name,
           url: $("#r-url").value.trim(),
           default_branch: $("#r-branch").value.trim() || "main",
           description: $("#r-desc").value.trim(),
@@ -553,8 +584,14 @@ async function renderRepos() {
           sandbox: { "true": true, "false": false }[$("#r-sandbox").value] ?? null,
           sandbox_network: $("#r-network").value || null,
           approval: $("#r-approval").value || null,
+          secrets: refs,
         }),
       });
+      // stored (literal) values go to the write-only encrypted secrets endpoint
+      if (Object.keys(values).length) {
+        await api(`/api/repos/${encodeURIComponent(name)}/secrets`,
+                  { method: "PUT", body: JSON.stringify({ values }) });
+      }
       toast("codebase saved", "ok");
       renderRepos();
     } catch (e) { toast(e.message, "err"); }

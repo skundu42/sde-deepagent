@@ -182,6 +182,7 @@ All runtime settings come from `.env` (see [`.env.example`](.env.example) for th
 | `TELEGRAM_BOT_TOKEN`, `SLACK_BOT_TOKEN` + `SLACK_APP_TOKEN`, `LINEAR_API_KEY` | intake channels (each optional) |
 | `TASK_BUDGET_USD`, `DAILY_BUDGET_USD` | cost guardrails (0 = unlimited) |
 | `REQUIRE_APPROVAL` | hold every task for human review before push/PR |
+| `SECRETS_KEY` | enables UI-entered [per-repo secrets](#per-repo-secrets-for-setuptests-that-need-credentials), encrypted at rest |
 | `MAX_CONCURRENT_TASKS`, `TASK_TIMEOUT_SECONDS`, `WORKSPACE_RETENTION` | runtime tuning |
 
 ### Agents & models — `config/agents.yaml` (or UI → Agents)
@@ -216,6 +217,50 @@ repos:
 ```
 
 The `description` powers automatic task→repo routing; `test` is how the agent verifies its work.
+
+### Per-repo secrets (for setup/tests that need credentials)
+
+Some repos need credentials — a `DATABASE_URL`, a package-registry token — to run setup or tests. There are two ways to provide a value, and you can mix them per repo:
+
+**1. Enter the value in the UI (encrypted at rest).** In **Codebases → Secrets**, add `DATABASE_URL=postgres://…`. The value is encrypted with `SECRETS_KEY` and stored in `data/secrets.enc`; `repos.yaml` records only that the secret is `store`-backed, and the API never returns the value. Requires `SECRETS_KEY` in the server environment:
+
+```bash
+# .env  — any high-entropy string; a data key is derived from it
+SECRETS_KEY=$(openssl rand -hex 32)
+```
+```yaml
+repos:
+  backend:
+    test: "pytest -q"
+    secrets:
+      DATABASE_URL: store        # value held encrypted in data/secrets.enc
+    sandbox_network: none        # recommended for repos with secrets
+```
+
+At-rest encryption protects backups, the data volume, and accidental commits; it does **not** defend against a host compromise that can also read `SECRETS_KEY`. Without `SECRETS_KEY`, stored secrets are unavailable and the task runs without them (fail-closed) rather than exposing anything.
+
+**2. Reference a host environment variable** (no app-side storage, no `SECRETS_KEY` needed). The value lives only in your `.env`/secret manager:
+
+```yaml
+repos:
+  backend:
+    secrets:
+      REGISTRY_TOKEN: env:NPM_TOKEN   # value comes from $NPM_TOKEN
+```
+```bash
+# .env (host)
+NPM_TOKEN=...
+```
+
+In the UI's Secrets box, a line is stored-encrypted if you type a literal (`NAME=value`) or a host reference if you type `NAME=env:HOST_VAR`. Either way:
+
+How it stays away from the model:
+
+- **Confined execution** — secrets are injected *only* into the controller-run `setup` command and the registered `test` command (which the agent triggers through its `run_tests` tool). The agent's own shell stays secret-free — `env` / `echo $DATABASE_URL` reveal nothing.
+- **Redaction everywhere** — every secret value (raw, base64, and url-encoded forms) is scrubbed from the live trace, persisted events, the PR title/body, long-term memory, channel notifications, and error messages.
+- **Safe names only** — names that could hijack execution (`PATH`, `LD_*`, `GIT_*`, shell-init vars) are rejected. Manage secrets per repo in the UI (**Codebases → Secrets**) or in `repos.yaml`.
+
+**Residual risk — read this.** Tests run the agent's *own code* with the secret in the environment, so a prompt-injected agent could in principle modify the code under test to transform a secret and emit it — the same threat model as CI secrets (a malicious workflow can exfiltrate them). It is *mitigated, not eliminated*, by the secret-free agent shell, egress control, value redaction, and the approval gate. **Attach secrets only to repos whose code and tasks you trust, prefer `sandbox_network: none`, and keep `REQUIRE_APPROVAL=true`.**
 
 ## Giving the agent your company's context
 
@@ -268,6 +313,7 @@ Defense in depth, each layer independently configurable:
 - **Per-repo container sandbox (on by default)** — each task's shell runs in its repo's Docker container with only that repo's workspaces bind-mounted: arbitrary build/test commands and untrusted repo code can't reach the host filesystem or other repos' workspaces. Environments are **zero-config**: the container starts from a generic, language-agnostic Debian build image (`buildpack-deps:bookworm`) and the agent installs whatever toolchain and dependencies the repo needs; the container is **reused across tasks** (reaped after 24 idle hours, `SANDBOX_IDLE_HOURS`), so installs and caches persist instead of repeating. Tune per repo or globally: pin a stack image (`sandbox_image` / `SANDBOX_IMAGE`), cut egress for untrusted code (`sandbox_network: none` / `SANDBOX_NETWORK=none` — self-bootstrapping then needs a pinned image or `setup`), or opt out entirely (`sandbox: false` / `SANDBOX_DEFAULT=false` to run on the host). If sandboxing applies but Docker is unavailable, the task **fails** rather than silently running on the host. (Mount `/var/run/docker.sock` into the devagent container for the compose deployment.)
 - **Prompt-injection resistance** — the orchestrator treats all repository content, documents, web pages, and memory entries as untrusted *data*, never instructions; operator guidance arrives only through the steering channel.
 - **Sanitized shell env** — API keys are never visible to the agent's shell; git credentials use process-scoped ephemeral config, never written to disk.
+- **Per-repo secrets, kept from the model** — repos can reference host env vars (`secrets: {NAME: env:HOST_VAR}`) for setup/tests; values are injected only into controller-run commands (never the agent's shell) and redacted (raw/base64/url-encoded) from every output sink. See [Per-repo secrets](#per-repo-secrets-for-setuptests-that-need-credentials) for the model and its residual risk.
 - **Trusted Git shipping** — controller commits, diffs, and pushes use protected Git metadata outside sandbox mounts, with hooks disabled, a minimal environment, exact-URL credentials, and trusted-host checks.
 - **Approval gate** — global `REQUIRE_APPROVAL=true` or per-repo `approval: required` holds work for human review before any push; `approval: auto` lets trusted repos flow.
 - Restrict Telegram with `TELEGRAM_ALLOWED_CHATS`; set `LINEAR_WEBHOOK_SECRET` if you expose that webhook.

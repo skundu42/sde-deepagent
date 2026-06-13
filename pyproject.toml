@@ -6,6 +6,7 @@ license = {file = "LICENSE"}
 requires-python = ">=3.12"
 dependencies = [
     "aiosqlite>=0.22.1",
+    "cryptography>=43",
     "deepagents>=0.6.8",
     "fastapi[standard]>=0.136.3",
     "httpx>=0.28.1",

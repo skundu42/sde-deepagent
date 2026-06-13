@@ -28,6 +28,7 @@ from .intake.telegram import TelegramIntake
 from .memory import GLOBAL_TAG, memory_from_settings, repo_tag
 from .pricing import DailyBudget
 from .runner import TaskRunner
+from .secrets import SecretStore, validate_secret_spec
 from .settings import get_settings, validate_control_plane_security
 from .worker import Worker
 
@@ -67,6 +68,8 @@ class RepoCreate(BaseModel):
     sandbox_image: str | None = Field(default=None, max_length=255)
     sandbox_network: str | None = Field(default=None, pattern=r"^(none|bridge)$")
     approval: str | None = Field(default=None, pattern=r"^(auto|required)$")
+    # NAME -> "env:HOST_VAR" references; values stay in the host env, never here
+    secrets: dict[str, str] = Field(default={}, max_length=50)
 
     @field_validator("context")
     @classmethod
@@ -77,6 +80,24 @@ class RepoCreate(BaseModel):
                     f"unsafe context pattern {p!r}: must be a relative path inside "
                     "the repo (no '..', absolute, or '~' paths)")
         return patterns
+
+    @field_validator("secrets")
+    @classmethod
+    def _valid_secrets(cls, secrets: dict[str, str]) -> dict[str, str]:
+        validate_secret_spec(secrets)
+        return secrets
+
+
+class SecretValues(BaseModel):
+    # NAME -> actual secret value (write-only; encrypted at rest, never returned)
+    values: dict[str, str] = Field(default={}, max_length=50)
+
+    @field_validator("values")
+    @classmethod
+    def _valid_names(cls, values: dict[str, str]) -> dict[str, str]:
+        for name in values:  # validate the NAME only; the value is the secret
+            validate_secret_spec({name: "store"})
+        return values
 
 
 class SteerMessage(BaseModel):
@@ -96,7 +117,9 @@ async def lifespan(app: FastAPI):
     # one daily-budget accountant shared by the runner (mid-stream enforcement)
     # and the worker (launch gate) so the cap is a hard ceiling, not a soft gate
     daily_budget = DailyBudget(db, settings.daily_budget_usd)
-    runner = TaskRunner(db, bus, cfg, settings, daily_budget=daily_budget)
+    secret_store = SecretStore(settings.secrets_store_path, settings.secrets_key)
+    runner = TaskRunner(db, bus, cfg, settings, daily_budget=daily_budget,
+                        secret_store=secret_store)
     worker = Worker(db, runner, max_concurrent=settings.max_concurrent_tasks,
                     settings=settings, daily_budget=daily_budget)
 
@@ -134,6 +157,7 @@ async def lifespan(app: FastAPI):
     app.state.bus = bus
     app.state.cfg = cfg
     app.state.worker = worker
+    app.state.secret_store = secret_store
     app.state.chat = ChatService(db, cfg, settings)
     app.state.memory = memory_from_settings(settings)
     app.state.linear = linear
@@ -529,7 +553,8 @@ def create_app() -> FastAPI:
                           description=body.description, setup=body.setup, test=body.test,
                           context=body.context, sandbox=body.sandbox,
                           sandbox_image=body.sandbox_image,
-                          sandbox_network=body.sandbox_network, approval=body.approval)
+                          sandbox_network=body.sandbox_network, approval=body.approval,
+                          secrets=body.secrets)
         request.app.state.cfg.upsert_repo(repo)
         return repo.to_dict() | {"name": repo.name}
 
@@ -537,7 +562,58 @@ def create_app() -> FastAPI:
     async def delete_repo(request: Request, name: str):
         if not request.app.state.cfg.delete_repo(name):
             raise HTTPException(404, "repo not found")
+        request.app.state.secret_store.delete(name)  # purge any stored secrets
         return {"deleted": name}
+
+    # ---- per-repo secret values (encrypted at rest; values never read back) ----
+
+    @app.get("/api/repos/{name}/secrets")
+    async def list_repo_secrets(request: Request, name: str):
+        """Which secrets a repo has and where each value comes from — NEVER the
+        values themselves. `store` entries report whether a value is set."""
+        repos = request.app.state.cfg.repos()
+        if name not in repos:
+            raise HTTPException(404, "repo not found")
+        store = request.app.state.secret_store
+        stored = set(store.names(name))
+        out = {}
+        for secret_name, ref in (repos[name].secrets or {}).items():
+            if ref == "store":
+                out[secret_name] = {"source": "store", "set": secret_name in stored}
+            else:
+                out[secret_name] = {"source": "env", "ref": ref}
+        return out
+
+    @app.put("/api/repos/{name}/secrets")
+    async def set_repo_secrets(request: Request, name: str, body: SecretValues):
+        """Store secret VALUES (encrypted) and mark them `store`-backed in the
+        repo config. Values are write-only — they are never returned by the API."""
+        store = request.app.state.secret_store
+        if not store.available:
+            raise HTTPException(
+                400, "secret storage is disabled: set SECRETS_KEY (any high-entropy "
+                     "string) in the server environment to enable encrypted secrets")
+        repos = request.app.state.cfg.repos()
+        if name not in repos:
+            raise HTTPException(404, "repo not found")
+        if not body.values:
+            return {"set": []}
+        store.set_many(name, body.values)
+        repo = repos[name]
+        repo.secrets.update({k: "store" for k in body.values})  # mark store-backed
+        request.app.state.cfg.upsert_repo(repo)
+        return {"set": sorted(body.values)}
+
+    @app.delete("/api/repos/{name}/secrets/{secret_name}")
+    async def delete_repo_secret(request: Request, name: str, secret_name: str):
+        repos = request.app.state.cfg.repos()
+        if name not in repos:
+            raise HTTPException(404, "repo not found")
+        request.app.state.secret_store.delete(name, secret_name)
+        repo = repos[name]
+        if repo.secrets.pop(secret_name, None) is not None:
+            request.app.state.cfg.upsert_repo(repo)
+        return {"deleted": secret_name}
 
     # ---- agent config ----
 

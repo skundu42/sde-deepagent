@@ -8,7 +8,7 @@ import logging
 import time
 from typing import Any
 
-from .agent_factory import build_agent
+from .agent_factory import _shell_env, build_agent
 from .bus import EventBus
 from .config import ConfigStore, RepoConfig
 from .db import Database, Task
@@ -27,6 +27,7 @@ from .llm import build_model
 from .memory import memory_from_settings, repo_tag
 from .pricing import BudgetExceeded, CostTracker, DailyBudget, DailyBudgetExceeded
 from .prompts import REPO_RESOLVER_PROMPT, REVISION_TASK_TEMPLATE
+from .secrets import Redactor, SecretStore, resolve_repo_secrets
 from .settings import Settings
 
 logger = logging.getLogger(__name__)
@@ -37,21 +38,34 @@ TRUNCATE_RESULT = 2500
 
 class TaskRunner:
     def __init__(self, db: Database, bus: EventBus, cfg: ConfigStore, settings: Settings,
-                 daily_budget: DailyBudget | None = None):
+                 daily_budget: DailyBudget | None = None,
+                 secret_store: SecretStore | None = None):
         self.mailboxes: dict[str, list[str]] = {}  # task_id -> pending operator messages
+        self._redactors: dict[str, Redactor] = {}  # task_id -> secret-value redactor
         self.db = db
         self.bus = bus
         self.cfg = cfg
         self.settings = settings
         self.memory = memory_from_settings(settings)
+        # decrypts UI-entered (`store`) secrets; None/unavailable => those fail closed
+        self.secret_store = secret_store
         # shared with the worker so launch-gating and mid-stream enforcement see
         # the same (persisted + in-flight) daily spend
         self.daily_budget = daily_budget or DailyBudget(db, settings.daily_budget_usd)
 
     async def emit(self, task_id: str, kind: str, content: dict[str, Any],
                    agent: str = "orchestrator") -> None:
+        redactor = self._redactors.get(task_id)
+        if redactor is not None and redactor.active:
+            content = redactor.redact_obj(content)
         event = await self.db.add_event(task_id, kind, content, agent)
         self.bus.publish(task_id, event)
+
+    def _redact(self, task_id: str, text: str) -> str:
+        """Mask this task's secret values out of a free-text string (e.g. an
+        error or commit message) that doesn't flow through emit()."""
+        redactor = self._redactors.get(task_id)
+        return redactor.redact(text) if (redactor is not None and text) else text
 
     # ---- repo resolution ----
 
@@ -250,15 +264,16 @@ class TaskRunner:
         await self.emit(task.id, "log",
                         {"text": "agent left work without a PR — auto-finalizing"})
         if dirty:
-            await commit_all(ws, f"feat: {task.title[:70]}")
+            await commit_all(ws, self._redact(task.id, f"feat: {task.title[:70]}"))
         await push_branch(ws, self.settings)
         stat = await diff_stat(ws)
+        title = self._redact(task.id, task.title[:80])
+        body = self._redact(
+            task.id,
+            f"Automated change for task `{task.id}`.\n\n{task.description}"
+            f"\n\n```\n{stat}\n```")
         try:
-            return await create_pull_request(
-                ws, self.settings, task.title[:80],
-                f"Automated change for task `{task.id}`.\n\n{task.description}"
-                f"\n\n```\n{stat}\n```",
-            )
+            return await create_pull_request(ws, self.settings, title, body)
         except GitError as e:
             # work is safe on the pushed branch even when a PR isn't possible
             # (local remote, missing token, non-GitHub host)
@@ -272,8 +287,9 @@ class TaskRunner:
         if not self.memory or not task.repo:
             return
         outcome = f"completed, PR: {task.pr_url}" if task.pr_url else "completed (no PR)"
-        content = (f"Task outcome — {task.title} (repo {task.repo}): {outcome}.\n"
-                   f"{summary[:1200]}")
+        content = self._redact(task.id, (
+            f"Task outcome — {task.title} (repo {task.repo}): {outcome}.\n"
+            f"{summary[:1200]}"))
         mem_id = await self.memory.add(
             content, repo_tag(task.repo),
             metadata={"task_id": task.id, "repo": task.repo,
@@ -287,7 +303,7 @@ class TaskRunner:
         Returns True if there is work awaiting approval (task stays open)."""
         ws = built.workspace
         if await has_changes(ws):
-            await commit_all(ws, f"feat: {task.title[:70]}")
+            await commit_all(ws, self._redact(task.id, f"feat: {task.title[:70]}"))
         if await commits_ahead(ws) == 0:
             return False  # nothing to ship — let the task complete normally
         stat = await diff_stat(ws)
@@ -355,6 +371,22 @@ class TaskRunner:
             if task.repo != repo.name:
                 await self.db.update_task(task.id, repo=repo.name)
                 task.repo = repo.name
+            # resolve this repo's secrets (host-env refs + encrypted store) and
+            # arm the redactor BEFORE any setup/agent output can carry a value
+            secrets, missing_secrets = resolve_repo_secrets(
+                repo, store=self.secret_store)
+            self._redactors[task.id] = Redactor(secrets)
+            wants_store = any(ref == "store" for ref in (repo.secrets or {}).values())
+            if wants_store and (self.secret_store is None
+                                or not self.secret_store.available):
+                await self.emit(task.id, "log", {
+                    "text": "this repo has stored secrets but SECRETS_KEY is not "
+                            "configured — they are unavailable; set SECRETS_KEY to "
+                            "enable them"})
+            if missing_secrets:
+                await self.emit(task.id, "log", {
+                    "text": "repo secrets not available, skipped: "
+                            + ", ".join(missing_secrets)})
             await self.emit(task.id, "log", {"text": f"cloning {repo.name} ({repo.url})"})
             ws = await prepare_workspace(task.id, task.title, repo, self.settings,
                                          existing_branch=parent.branch if parent else None)
@@ -398,18 +430,32 @@ class TaskRunner:
                             f"{'started' if created else 'reused'} "
                             f"(image={image}, network={network})"})
 
+            # secrets + open egress = a compromised task could phone them out
+            egress_open = (not sandboxed) or (sandbox_network == "bridge")
+            if secrets and egress_open:
+                where = ("network egress is enabled (bridge)" if sandboxed
+                         else "tasks run on the host with full network access")
+                await self.emit(task.id, "log", {
+                    "text": f"security warning: this repo has secrets and {where}; "
+                            "a compromised task could exfiltrate them. Prefer "
+                            "sandbox_network: none for repos with secrets."})
+                logger.warning("repo %s: secrets present with open egress (%s)",
+                               repo.name, "host" if not sandboxed else "bridge")
+
             if repo.setup:
                 await self.emit(task.id, "log", {"text": f"running setup: {repo.setup}"})
                 if sandbox_container:
                     from .sandbox import exec_in_container
                     res = await asyncio.to_thread(
                         exec_in_container, sandbox_container, repo.setup,
-                        timeout=900, workdir=sandbox_workdir)
+                        timeout=900, workdir=sandbox_workdir, secrets=secrets or None)
                     code, out = res.exit_code, res.output
                 else:
                     from .gitops import run_cmd
+                    # sanitized base env (no host API keys) + this repo's secrets
                     code, out = await run_cmd(["bash", "-lc", repo.setup], cwd=ws.path,
-                                              timeout=900)
+                                              timeout=900,
+                                              env={**_shell_env(), **secrets})
                 await self.emit(task.id, "tool_result",
                                 {"name": "setup", "output": out[-2000:], "exit_code": code})
                 if code != 0:
@@ -443,7 +489,9 @@ class TaskRunner:
                 sandbox_container=sandbox_container,
                 sandbox_workdir=sandbox_workdir,
                 sandbox_network=sandbox_network,
-                drain_messages=lambda: self._drain_mailbox(task.id))
+                drain_messages=lambda: self._drain_mailbox(task.id),
+                secrets=secrets,
+                redactor=self._redactors.get(task.id))
             await self.emit(task.id, "log", {
                 "text": f"agent started (orchestrator={task.model or agents_cfg.orchestrator_model}, "
                         f"subagents={', '.join(s.name for s in agents_cfg.subagents)}"
@@ -482,7 +530,7 @@ class TaskRunner:
             raise
         except BudgetExceeded as e:
             await self._persist_usage(task, tracker)
-            task.status, task.error = "failed", str(e)
+            task.status, task.error = "failed", self._redact(task.id, str(e))
             await self.db.update_task(task.id, status="failed", error=task.error,
                                       finished_at=time.time())
             await self.emit(task.id, "status", {
@@ -498,12 +546,14 @@ class TaskRunner:
         except Exception as e:  # noqa: BLE001 — agent runs must never kill the worker
             logger.exception("task %s failed", task.id)
             await self._persist_usage(task, tracker)
-            task.status, task.error = "failed", f"{type(e).__name__}: {e}"
+            task.status = "failed"
+            task.error = self._redact(task.id, f"{type(e).__name__}: {e}")
             await self.db.update_task(task.id, status="failed", error=task.error[:1000],
                                       finished_at=time.time())
             await self.emit(task.id, "status", {"status": "failed", "error": task.error[:1000]})
         finally:
             self.mailboxes.pop(task.id, None)
+            self._redactors.pop(task.id, None)
             self.daily_budget.untrack(task.id)  # cost is now persisted in the DB
             if sandboxed:
                 # the container stays up for reuse; restamp its idle clock so

@@ -23,6 +23,10 @@ pull request with the finished work.
 - Default branch: {default_branch} (NEVER commit to it; you are on {branch})
 - Setup command (already executed): {setup_cmd}
 - Test command: {test_cmd}
+  Run it with the `run_tests` tool, NOT in your shell — `run_tests` executes
+  this registered command with the repo's configured secrets injected (you
+  cannot see their values, and they are redacted from output). Your own shell
+  has no access to those secrets.
 
 ## Required workflow
 1. **Understand** — read the task, explore the relevant code (or delegate to the
@@ -30,9 +34,11 @@ pull request with the finished work.
 2. **Plan** — write a short todo list of concrete steps.
 3. **Implement** — make the change. Follow the repository's existing style and
    conventions exactly. Keep the diff minimal and focused on the task.
-4. **Test** — run the test command. If the task adds behavior, add or update
-   tests covering it. Iterate until tests pass. If tests were already broken
-   before your change, note that instead of trying to fix unrelated failures.
+4. **Test** — verify your change with the `run_tests` tool (it runs the repo's
+   registered test command with any configured secrets injected). If the task
+   adds behavior, add or update tests covering it, then re-run. Iterate until
+   tests pass. If tests were already broken before your change, note that
+   instead of trying to fix unrelated failures.
 5. **Review** — delegate a final review of `git diff` to the `reviewer`
    subagent and address legitimate findings.
 6. **Ship** — {ship_instructions}
@@ -138,12 +144,15 @@ description of each change.
 """
 
 TESTER_PROMPT = """\
-You are a test engineer working inside a git repository. Run the test command
-you are given, analyze failures, and fix the code or tests until the suite
-passes — but never weaken or delete tests just to make them pass, and never
-change behavior unrelated to the task. If asked, write new tests that cover the
-described change, following the repo's existing test patterns. Reply with the
-final test results (command, pass/fail counts) and what you fixed.
+You are a test engineer working inside a git repository. Run the suite with the
+`run_tests` tool (it runs the repo's registered test command with any configured
+secrets injected — you cannot see their values, and they are redacted from
+output; do not run the test command directly in your shell). Analyze failures
+and fix the code or tests until the suite passes — but never weaken or delete
+tests just to make them pass, and never change behavior unrelated to the task.
+If asked, write new tests that cover the described change, following the repo's
+existing test patterns. Reply with the final test results (pass/fail counts) and
+what you fixed.
 """
 
 REVIEWER_PROMPT = """\
