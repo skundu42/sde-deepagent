@@ -24,7 +24,9 @@ def _present_token(request: Request) -> str | None:
     header = request.headers.get("authorization", "")
     if header.startswith("Bearer "):
         return header[len("Bearer "):].strip()
-    return request.query_params.get("token")
+    token = request.query_params.get("token")
+    # strip the query-param token too, so header and ?token= behave identically
+    return token.strip() if token else None
 
 
 class AuthMiddleware(BaseHTTPMiddleware):

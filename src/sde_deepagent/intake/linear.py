@@ -77,10 +77,19 @@ class LinearIntake:
                         json={"query": ISSUES_QUERY,
                               "variables": {"label": self.settings.linear_label}},
                     )
-                    data = resp.json()
-                    nodes = (data.get("data") or {}).get("issues", {}).get("nodes", [])
-                    for issue in nodes:
-                        await self.ingest_issue(client, issue)
+                    if resp.status_code != 200:
+                        logger.warning("linear API HTTP %s: %s",
+                                       resp.status_code, resp.text[:200])
+                    else:
+                        data = resp.json()
+                        if data.get("errors"):
+                            logger.warning("linear API errors: %s",
+                                           str(data["errors"])[:200])
+                        else:
+                            nodes = ((data.get("data") or {})
+                                     .get("issues", {}).get("nodes", []))
+                            for issue in nodes:
+                                await self.ingest_issue(client, issue)
                 except asyncio.CancelledError:
                     raise
                 except Exception:

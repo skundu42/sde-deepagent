@@ -11,6 +11,32 @@ from typing import Any
 
 import aiosqlite
 
+
+def _json_safe_default(obj: Any) -> str:
+    """json.dumps default that never raises — a value with a broken __str__
+    must not crash event logging (and with it the whole task)."""
+    try:
+        return str(obj)
+    except Exception:  # noqa: BLE001 — fall back to the type, never propagate
+        return f"<unserializable {type(obj).__name__}>"
+
+
+def _dump_content(content: Any) -> str:
+    try:
+        return json.dumps(content, default=_json_safe_default)
+    except (TypeError, ValueError):  # e.g. non-string dict keys
+        return json.dumps({"_unserializable": _json_safe_default(content)})
+
+
+def _safe_loads(raw: str) -> Any:
+    """Tolerate a corrupt/tampered event-content row: one bad row must not fail
+    the whole list_events() call (and with it the task's event stream)."""
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return {"_parse_error": "invalid JSON in event content"}
+
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS tasks (
     id TEXT PRIMARY KEY,
@@ -274,7 +300,7 @@ class Database:
         ts = time.time()
         cur = await self.db.execute(
             "INSERT INTO events (task_id, ts, agent, kind, content) VALUES (?,?,?,?,?)",
-            (task_id, ts, agent, kind, json.dumps(content, default=str)),
+            (task_id, ts, agent, kind, _dump_content(content)),
         )
         await self.db.commit()
         return {"id": cur.lastrowid, "task_id": task_id, "ts": ts, "agent": agent,
@@ -288,6 +314,6 @@ class Database:
             rows = await cur.fetchall()
         return [
             {"id": r["id"], "task_id": r["task_id"], "ts": r["ts"], "agent": r["agent"],
-             "kind": r["kind"], "content": json.loads(r["content"])}
+             "kind": r["kind"], "content": _safe_loads(r["content"])}
             for r in rows
         ]

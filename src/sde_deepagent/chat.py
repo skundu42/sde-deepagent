@@ -4,6 +4,7 @@ process memory (the task record itself stays the durable audit trail)."""
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 import uuid
@@ -145,9 +146,24 @@ class ChatService:
         self.cfg = cfg
         self.settings = settings
         self.sessions: dict[str, list[Any]] = {}
+        self._locks: dict[str, asyncio.Lock] = {}
+
+    def _lock_for(self, session_id: str) -> asyncio.Lock:
+        lock = self._locks.get(session_id)
+        if lock is None:
+            lock = self._locks[session_id] = asyncio.Lock()
+        return lock
 
     async def ask(self, message: str, session_id: str | None = None) -> dict[str, str]:
         session_id = session_id or uuid.uuid4().hex[:12]
+        # Serialize turns within a session: ask() appends the user message, then
+        # overwrites the whole session with the agent result after an await. Two
+        # concurrent requests on the same session_id would otherwise clobber each
+        # other and drop messages.
+        async with self._lock_for(session_id):
+            return await self._ask_locked(message, session_id)
+
+    async def _ask_locked(self, message: str, session_id: str) -> dict[str, str]:
         history = self.sessions.setdefault(session_id, [])
         history.append(HumanMessage(content=message))
 
@@ -193,4 +209,5 @@ class ChatService:
                 "cost_usd": round(tracker.cost_usd, 6)}
 
     def reset(self, session_id: str) -> bool:
+        self._locks.pop(session_id, None)
         return self.sessions.pop(session_id, None) is not None

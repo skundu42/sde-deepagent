@@ -4,6 +4,7 @@ API and the next task picks up the change."""
 
 from __future__ import annotations
 
+import logging
 import re
 import threading
 from dataclasses import dataclass, field
@@ -12,12 +13,37 @@ from typing import Any
 
 import yaml
 
+logger = logging.getLogger(__name__)
+
 
 def repo_slug(name: str) -> str:
     """Filesystem- and Docker-name-safe slug for a repo name (workspace
     directories and sandbox containers are keyed by it)."""
     s = re.sub(r"[^a-zA-Z0-9_.-]+", "-", name.strip()).strip("-.")
     return (s or "repo").lower()[:50]
+
+
+def is_safe_context_pattern(pattern: str) -> bool:
+    """Whether a repo `context` glob is safe to feed to Path.glob().
+
+    Patterns must stay inside the repo checkout. Path.glob() happily resolves
+    `../` and absolute paths, so an unvalidated pattern like `../../../etc/passwd`
+    would read arbitrary host files into the agent's context block. Reject
+    absolute paths, home expansion, and any parent-directory traversal."""
+    if not pattern or pattern.startswith(("/", "~", "\\")):
+        return False
+    return ".." not in re.split(r"[\\/]+", pattern)
+
+
+def _safe_context(name: str, patterns: list[str]) -> list[str]:
+    """Drop (and log) any unsafe context patterns from a repo spec."""
+    safe = []
+    for p in patterns:
+        if is_safe_context_pattern(p):
+            safe.append(p)
+        else:
+            logger.warning("repo %s: ignoring unsafe context pattern %r", name, p)
+    return safe
 
 DEFAULT_AGENTS_YAML = """\
 # Model for every agent role. Format: "<provider>:<model>" where provider is
@@ -205,7 +231,7 @@ class ConfigStore:
                 description=spec.get("description", ""),
                 setup=spec.get("setup"),
                 test=spec.get("test"),
-                context=spec.get("context") or [],
+                context=_safe_context(name, spec.get("context") or []),
                 sandbox=spec.get("sandbox"),
                 sandbox_image=spec.get("sandbox_image"),
                 sandbox_network=spec.get("sandbox_network"),

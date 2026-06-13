@@ -68,6 +68,18 @@ def test_cost_tracker_cache_discounts():
     assert t.cost_usd == pytest.approx(0.915)
 
 
+def test_cache_tokens_clamped_to_input():
+    # malformed/buggy upstream usage: cache tokens exceed reported input_tokens
+    t = CostTracker(default_model="claude-sonnet-4-6")
+    t.add_usage({
+        "input_tokens": 1_000_000, "output_tokens": 0,
+        "input_token_details": {"cache_read": 1_000_000, "cache_creation": 1_000_000},
+    })
+    # billed for at most the 1M input tokens (all as cache_read @ 0.1x of $3),
+    # not the bogus 2M -> no runaway overcharge
+    assert t.cost_usd == pytest.approx(0.30)
+
+
 def test_cost_tracker_per_message_model():
     t = CostTracker(default_model="anthropic:claude-sonnet-4-6")
     t.add_usage({"input_tokens": 1_000_000, "output_tokens": 0},

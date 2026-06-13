@@ -96,3 +96,33 @@ async def test_session_reset(stack):
     svc.sessions["abc"] = ["something"]
     assert svc.reset("abc") is True
     assert svc.reset("abc") is False
+
+
+async def test_same_session_requests_are_serialized(stack, monkeypatch):
+    """Overlapping requests on one session_id must not run concurrently (else the
+    read-modify-write of session history races and drops messages)."""
+    import asyncio
+
+    from langchain_core.messages import AIMessage
+
+    gauge = {"in_flight": 0, "max": 0}
+
+    class FakeAgent:
+        async def ainvoke(self, payload, config=None):
+            gauge["in_flight"] += 1
+            gauge["max"] = max(gauge["max"], gauge["in_flight"])
+            await asyncio.sleep(0.02)  # hold the "turn" open to expose overlap
+            gauge["in_flight"] -= 1
+            return {"messages": list(payload["messages"]) + [AIMessage(content="r")]}
+
+    monkeypatch.setattr("sde_deepagent.chat.create_agent", lambda **kw: FakeAgent())
+    db, settings, cfg = stack
+    svc = ChatService(db, cfg, settings)
+
+    await asyncio.gather(
+        svc.ask("first", session_id="s1"),
+        svc.ask("second", session_id="s1"),
+    )
+    assert gauge["max"] == 1  # serialized: never two turns in flight at once
+    contents = [getattr(m, "content", None) for m in svc.sessions["s1"]]
+    assert "first" in contents and "second" in contents  # neither message lost

@@ -32,6 +32,7 @@ import logging
 import os
 import shutil
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -154,6 +155,13 @@ def remove_container(name: str) -> None:
 # ---- idle-TTL tracking and reaping ----------------------------------------
 
 
+# Guards the state-file read-modify-write cycle. mark_used() runs on the event
+# loop while reap_idle() runs in a worker thread (asyncio.to_thread), so without
+# this lock their interleaved load/save would lose container timestamps —
+# leaking containers or reaping them early.
+_STATE_LOCK = threading.Lock()
+
+
 def _load_state(state_file: Path) -> dict[str, float]:
     try:
         return {str(k): float(v)
@@ -171,9 +179,10 @@ def _save_state(state_file: Path, state: dict[str, float]) -> None:
 
 def mark_used(name: str, state_file: Path) -> None:
     """Stamp the container's idle clock (called at task start and end)."""
-    state = _load_state(state_file)
-    state[name] = time.time()
-    _save_state(state_file, state)
+    with _STATE_LOCK:
+        state = _load_state(state_file)
+        state[name] = time.time()
+        _save_state(state_file, state)
 
 
 def reap_idle(state_file: Path, ttl_seconds: float) -> list[str]:
@@ -190,20 +199,26 @@ def reap_idle(state_file: Path, ttl_seconds: float) -> list[str]:
     names = [n for n in r.stdout.strip().split("\n") if n]
 
     now = time.time()
-    state = _load_state(state_file)
-    removed = []
-    for name in names:
-        last = state.get(name)
-        if last is None:
-            state[name] = now
-        elif now - last > ttl_seconds:
-            remove_container(name)
-            state.pop(name, None)
-            removed.append(name)
-    for gone in set(state) - set(names):  # containers removed out-of-band
-        if gone not in removed:
+    # Decide what to reap under the lock (a quick state read-modify-write), then
+    # run the slow `docker rm` calls outside it so mark_used() isn't blocked.
+    to_remove: list[str] = []
+    with _STATE_LOCK:
+        state = _load_state(state_file)
+        for name in names:
+            last = state.get(name)
+            if last is None:
+                state[name] = now
+            elif now - last > ttl_seconds:
+                to_remove.append(name)
+                state.pop(name, None)
+        for gone in set(state) - set(names):  # containers removed out-of-band
             state.pop(gone, None)
-    _save_state(state_file, state)
+        _save_state(state_file, state)
+
+    removed = []
+    for name in to_remove:
+        remove_container(name)
+        removed.append(name)
 
     legacy = subprocess.run(
         ["docker", "ps", "-a", "--filter", "name=sde-task-",

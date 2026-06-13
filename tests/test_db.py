@@ -38,6 +38,36 @@ async def test_invalid_updates_rejected(db):
         await db.update_task(task.id, title="nope")
 
 
+async def test_add_event_survives_unstringifiable_content(db):
+    """A value with a broken __str__ must not crash event logging (and the task)."""
+
+    class Broken:
+        def __str__(self):
+            raise RuntimeError("nope")
+
+    task = await db.create_task("t", "d")
+    ev = await db.add_event(task.id, "tool_call", {"obj": Broken(), "ok": 1})
+    assert ev["id"]
+    events = await db.list_events(task.id)
+    assert len(events) == 1 and events[0]["kind"] == "tool_call"
+
+
+async def test_list_events_tolerates_corrupt_row(db):
+    """One row with invalid JSON content must not fail the whole event stream."""
+    task = await db.create_task("t", "d")
+    await db.add_event(task.id, "ok", {"a": 1})
+    # simulate corruption / manual tampering of the content column
+    await db.db.execute(
+        "INSERT INTO events (task_id, ts, agent, kind, content) VALUES (?,?,?,?,?)",
+        (task.id, 1.0, "orchestrator", "broken", "{not valid json"))
+    await db.db.commit()
+
+    events = await db.list_events(task.id)
+    assert {e["kind"] for e in events} == {"ok", "broken"}
+    broken = next(e for e in events if e["kind"] == "broken")
+    assert "_parse_error" in broken["content"]
+
+
 async def test_queue_order_and_stats(db):
     t1 = await db.create_task("first", "d")
     t2 = await db.create_task("second", "d")

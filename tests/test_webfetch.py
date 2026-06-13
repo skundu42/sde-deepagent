@@ -26,6 +26,8 @@ def _patch_transport(monkeypatch, handler):
         return real_client(**kw)
 
     monkeypatch.setattr(httpx, "AsyncClient", patched)
+    # keep these tests hermetic: skip the real DNS-based SSRF check
+    monkeypatch.setattr("sde_deepagent.webfetch._host_is_internal", lambda host: False)
 
 
 async def test_fetch_page_text_html(monkeypatch):
@@ -87,6 +89,45 @@ async def test_firecrawl_failure_falls_back_to_builtin(monkeypatch):
     title, text = await fetch_page_text("https://docs.example.com/arch",
                                         firecrawl_url="http://fc:3002")
     assert title == "Arch Docs" and "ArgoCD" in text  # built-in fetcher result
+
+
+# ---- SSRF guard ----
+
+
+@pytest.mark.parametrize("url", [
+    "http://127.0.0.1/",
+    "http://localhost/admin",
+    "http://169.254.169.254/latest/meta-data/",  # cloud metadata
+    "http://[::1]/",
+    "http://0.0.0.0/",
+    "http://10.0.0.5/internal",
+    "http://192.168.1.1/",
+])
+async def test_fetch_rejects_internal_hosts(url):
+    with pytest.raises(FetchError):
+        await fetch_page_text(url)
+
+
+@pytest.mark.parametrize("url", ["file:///etc/passwd", "gopher://x/", "ftp://h/f"])
+async def test_fetch_rejects_non_http_scheme(url):
+    with pytest.raises(FetchError):
+        await fetch_page_text(url)
+
+
+async def test_fetch_rejects_redirect_to_internal(monkeypatch):
+    # a public URL that 302-redirects to an internal host must be blocked at the hop
+    real_client = httpx.AsyncClient
+
+    def patched(**kw):
+        kw["transport"] = httpx.MockTransport(
+            lambda req: httpx.Response(302, headers={"location": "http://127.0.0.1/"}))
+        return real_client(**kw)
+
+    monkeypatch.setattr(httpx, "AsyncClient", patched)
+    monkeypatch.setattr("sde_deepagent.webfetch._host_is_internal",
+                        lambda host: host == "127.0.0.1")
+    with pytest.raises(FetchError):
+        await fetch_page_text("https://safe.example.com/start")
 
 
 def test_firecrawl_url_resolution():

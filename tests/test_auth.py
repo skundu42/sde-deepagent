@@ -49,6 +49,12 @@ async def test_wrong_token_rejected(auth_client):
     assert r.status_code == 401
 
 
+async def test_query_token_is_stripped_like_header(auth_client):
+    # surrounding whitespace must be tolerated the same way for ?token= and Bearer
+    r = await auth_client.get("/api/tasks", params={"token": "  s3cret  "})
+    assert r.status_code == 200
+
+
 async def test_webhook_exempt(auth_client):
     # linear webhook has its own HMAC; not gated by the token (404 = not configured,
     # not 401 = blocked by auth)

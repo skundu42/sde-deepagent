@@ -46,9 +46,11 @@ class Worker:
         self._stop.set()
         for t in list(self.running.values()):
             t.cancel()
+        to_await = list(self.running.values())
         if self._dispatcher:
             self._dispatcher.cancel()
-        await asyncio.gather(*self.running.values(), return_exceptions=True)
+            to_await.append(self._dispatcher)  # await it too, or stop() returns early
+        await asyncio.gather(*to_await, return_exceptions=True)
 
     def cancel_task(self, task_id: str) -> bool:
         t = self.running.get(task_id)

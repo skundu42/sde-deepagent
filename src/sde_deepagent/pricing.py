@@ -117,8 +117,11 @@ class CostTracker:
             return 0.0
         p_in, p_out = price
         details = usage_metadata.get("input_token_details") or {}
-        cache_read = int(details.get("cache_read") or 0)
-        cache_write = int(details.get("cache_creation") or 0)
+        # Cache tokens are a subset of input_tokens. Clamp so a malformed usage
+        # report (cache_read + cache_write > input_tokens) can't bill for more
+        # tokens than were actually input and blow through the budget.
+        cache_read = min(int(details.get("cache_read") or 0), in_tok)
+        cache_write = min(int(details.get("cache_creation") or 0), in_tok - cache_read)
         plain_in = max(0, in_tok - cache_read - cache_write)
         mult = _cache_multipliers(model)
         delta = (

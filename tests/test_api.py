@@ -37,6 +37,16 @@ async def test_repo_crud(client):
     assert r.status_code == 404
 
 
+async def test_oversized_request_fields_rejected(client):
+    # unbounded string fields would otherwise let a client store multi-MB blobs
+    r = await client.post("/api/tasks",
+                          json={"title": "t", "description": "x" * 60_000})
+    assert r.status_code == 422
+    r = await client.post("/api/repos", json={
+        "name": "r", "url": "https://github.com/x/y.git", "setup": "y" * 5000})
+    assert r.status_code == 422
+
+
 async def test_task_create_and_cancel(client):
     r = await client.post("/api/tasks", json={"title": "Do the thing",
                                               "description": "details"})

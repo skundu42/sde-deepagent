@@ -1,6 +1,6 @@
 import pytest
 
-from sde_deepagent.config import ConfigStore, RepoConfig
+from sde_deepagent.config import ConfigStore, RepoConfig, is_safe_context_pattern
 from sde_deepagent.llm import normalize_model_id
 
 
@@ -66,6 +66,31 @@ def test_model_normalization(given, expected):
 def test_model_normalization_rejects_unsupported(bad):
     with pytest.raises(ValueError):
         normalize_model_id(bad)
+
+
+@pytest.mark.parametrize("pattern", ["docs/*.md", "CONTRIBUTING.md", "a/b/c.txt", "*.md"])
+def test_safe_context_patterns_accepted(pattern):
+    assert is_safe_context_pattern(pattern)
+
+
+@pytest.mark.parametrize("pattern", [
+    "../secret.env", "../../etc/passwd", "/etc/passwd", "~/.ssh/id_rsa",
+    "docs/../../x", "a/../b", "..", "", "\\windows\\share"])
+def test_unsafe_context_patterns_rejected(pattern):
+    assert not is_safe_context_pattern(pattern)
+
+
+def test_repos_filters_unsafe_context_patterns(tmp_path):
+    """A traversal pattern hand-edited into repos.yaml is dropped on load."""
+    cfg = ConfigStore(tmp_path)
+    (tmp_path / "repos.yaml").write_text(
+        "repos:\n"
+        "  backend:\n"
+        "    url: git@github.com:acme/backend.git\n"
+        "    context:\n"
+        "      - docs/arch.md\n"
+        "      - ../../etc/passwd\n")
+    assert cfg.repos()["backend"].context == ["docs/arch.md"]
 
 
 def test_env_file_keys_reach_process_env(temp_env, tmp_path, monkeypatch):

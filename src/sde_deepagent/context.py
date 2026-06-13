@@ -4,12 +4,15 @@ into the workspace so the agent can read everything on demand)."""
 
 from __future__ import annotations
 
+import logging
 import re
 import shutil
 from pathlib import Path
 
-from .config import RepoConfig
+from .config import RepoConfig, is_safe_context_pattern
 from .settings import Settings
+
+logger = logging.getLogger(__name__)
 
 # Files that conventionally carry agent/contributor instructions.
 CONVENTION_FILES = [
@@ -117,23 +120,45 @@ def build_context_block(repo_path: Path, repo: RepoConfig, settings: Settings) -
     """Assemble the markdown context block injected into the orchestrator prompt."""
     sections: list[str] = []
     budget = MAX_TOTAL_CHARS
+    repo_root = repo_path.resolve()
+
+    def add_section(header: str, path: Path) -> None:
+        # Reserve the header and the "\n\n" join separator against the budget so
+        # the assembled block actually respects MAX_TOTAL_CHARS (previously only
+        # raw file content was counted, letting headers push it over the cap).
+        nonlocal budget
+        avail = budget - len(header) - 2
+        if avail <= 0:
+            return
+        section = header + _read_truncated(path, min(MAX_FILE_CHARS, avail))
+        sections.append(section)
+        budget -= len(section) + 2
 
     # 1. repo convention/instruction files
     for rel in CONVENTION_FILES:
         p = repo_path / rel
-        if p.is_file() and budget > 0:
-            text = _read_truncated(p, min(MAX_FILE_CHARS, budget))
-            budget -= len(text)
-            sections.append(f"### {rel} (repository instructions)\n\n{text}")
+        if p.is_file():
+            add_section(f"### {rel} (repository instructions)\n\n", p)
 
     # 2. registered context docs from repos.yaml
     for pattern in repo.context:
+        if not is_safe_context_pattern(pattern):
+            logger.warning("repo %s: skipping unsafe context pattern %r",
+                           repo.name, pattern)
+            continue
         for p in sorted(repo_path.glob(pattern)):
-            if p.is_file() and budget > 0:
-                text = _read_truncated(p, min(MAX_FILE_CHARS, budget))
-                budget -= len(text)
-                rel = p.relative_to(repo_path)
-                sections.append(f"### {rel} (registered repo doc)\n\n{text}")
+            if not p.is_file():
+                continue
+            # Belt-and-suspenders against the path-traversal surface: even a safe
+            # pattern can match a symlink that points outside the checkout. Refuse
+            # anything whose real path escapes the repo root.
+            try:
+                rel = p.resolve().relative_to(repo_root)
+            except (OSError, ValueError):
+                logger.warning("repo %s: skipping context file outside repo: %s",
+                               repo.name, p)
+                continue
+            add_section(f"### {rel} (registered repo doc)\n\n", p)
 
     # 3. company-wide context directory, mounted into the workspace
     mounted = mount_company_context(repo_path, settings)
@@ -148,4 +173,7 @@ def build_context_block(repo_path: Path, repo: RepoConfig, settings: Settings) -
 
     if not sections:
         return "(no additional context documents registered)"
-    return "\n\n".join(sections)
+    block = "\n\n".join(sections)
+    # Hard cap: the company-docs listing is appended outside the per-section
+    # budget, so clamp the final block to guarantee the limit holds.
+    return block if len(block) <= MAX_TOTAL_CHARS else block[:MAX_TOTAL_CHARS]

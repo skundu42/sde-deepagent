@@ -14,13 +14,13 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from . import __version__
 from .agent_factory import validate_models
 from .bus import EventBus
 from .chat import ChatService
-from .config import ConfigStore, RepoConfig
+from .config import ConfigStore, RepoConfig, is_safe_context_pattern
 from .db import Database
 from .intake.linear import LinearIntake
 from .intake.slack import SlackIntake
@@ -37,9 +37,9 @@ logger = logging.getLogger(__name__)
 
 class TaskCreate(BaseModel):
     title: str = Field(min_length=1, max_length=200)
-    description: str = ""
-    repo: str | None = None
-    model: str | None = None
+    description: str = Field(default="", max_length=50_000)
+    repo: str | None = Field(default=None, max_length=100)
+    model: str | None = Field(default=None, max_length=100)
     budget_usd: float | None = Field(default=None, ge=0)
     parent_id: str | None = Field(default=None, max_length=32)  # revise this task
 
@@ -56,16 +56,26 @@ class ResourceCreate(BaseModel):
 
 class RepoCreate(BaseModel):
     name: str = Field(min_length=1, max_length=100, pattern=r"^[\w./-]+$")
-    url: str = Field(min_length=1)
-    default_branch: str = "main"
-    description: str = ""
-    setup: str | None = None
-    test: str | None = None
-    context: list[str] = []
+    url: str = Field(min_length=1, max_length=2000)
+    default_branch: str = Field(default="main", max_length=255)
+    description: str = Field(default="", max_length=4000)
+    setup: str | None = Field(default=None, max_length=4000)
+    test: str | None = Field(default=None, max_length=4000)
+    context: list[str] = Field(default=[], max_length=100)
     sandbox: bool | None = None
-    sandbox_image: str | None = None
+    sandbox_image: str | None = Field(default=None, max_length=255)
     sandbox_network: str | None = Field(default=None, pattern=r"^(none|bridge)$")
     approval: str | None = Field(default=None, pattern=r"^(auto|required)$")
+
+    @field_validator("context")
+    @classmethod
+    def _no_traversal(cls, patterns: list[str]) -> list[str]:
+        for p in patterns:
+            if not is_safe_context_pattern(p):
+                raise ValueError(
+                    f"unsafe context pattern {p!r}: must be a relative path inside "
+                    "the repo (no '..', absolute, or '~' paths)")
+        return patterns
 
 
 class SteerMessage(BaseModel):

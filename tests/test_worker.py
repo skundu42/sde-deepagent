@@ -45,6 +45,15 @@ async def test_no_double_launch(db):
     assert runner.calls == [task.id]
 
 
+async def test_stop_awaits_dispatcher(db):
+    """stop() must fully wind down the dispatcher, not return with it still pending."""
+    worker = Worker(db, SlowRunner(db), max_concurrent=1)
+    worker.start()
+    await asyncio.sleep(0.1)
+    await worker.stop()
+    assert worker._dispatcher.done()
+
+
 async def test_concurrency_cap(db):
     runner = SlowRunner(db)
     worker = Worker(db, runner, max_concurrent=1)

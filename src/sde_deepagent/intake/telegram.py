@@ -40,8 +40,21 @@ class TelegramIntake:
                 try:
                     resp = await client.get(f"{self.api}/getUpdates",
                                             params={"timeout": 50, "offset": offset})
-                    for update in resp.json().get("result", []):
-                        offset = update["update_id"] + 1
+                    if resp.status_code != 200:
+                        logger.warning("telegram getUpdates HTTP %s: %s",
+                                       resp.status_code, resp.text[:200])
+                        await asyncio.sleep(5)
+                        continue
+                    body = resp.json()
+                    if not body.get("ok", True):
+                        logger.warning("telegram getUpdates not ok: %s", str(body)[:200])
+                        await asyncio.sleep(5)
+                        continue
+                    for update in body.get("result", []):
+                        update_id = update.get("update_id")
+                        if update_id is None:
+                            continue  # malformed update; can't advance the offset on it
+                        offset = update_id + 1
                         await self._handle_update(client, update)
                 except asyncio.CancelledError:
                     raise

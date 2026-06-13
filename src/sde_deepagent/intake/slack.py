@@ -57,17 +57,20 @@ class SlackIntake:
                 return  # ignore bot echo and edits
             if event["type"] == "message" and event.get("channel_type") != "im":
                 return  # plain channel chatter; require a mention there
+            channel = event.get("channel")
+            if not channel:
+                return  # malformed event; nowhere to reply
             text = MENTION_RE.sub("", event.get("text", "")).strip()
             if not text:
                 return
             repo, title, description = parse_task_text(text)
             task = await self.db.create_task(
                 title=title, description=description, repo=repo, source="slack",
-                source_ref={"channel": event["channel"],
+                source_ref={"channel": channel,
                             "thread_ts": event.get("thread_ts") or event.get("ts")},
             )
             await self._web.chat_postMessage(
-                channel=event["channel"],
+                channel=channel,
                 thread_ts=event.get("thread_ts") or event.get("ts"),
                 text=f"🤖 Task `{task.id}` queued: {task.title}",
             )
