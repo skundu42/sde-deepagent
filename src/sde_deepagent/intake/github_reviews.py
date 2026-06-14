@@ -106,12 +106,13 @@ class GithubReviewIntake:
                     loc = f" ({c['path']}:{c.get('line', '?')})" if c.get("path") else ""
                     comments.append((ts, f"{author}{loc}", body))
 
-        newest = max((ts for ts, _, _ in comments), default=floor)
-        self._seen_since[task.pr_url] = max(newest, floor)
         if not comments:
             return
         if await self._open_revision_exists(task.id):
-            return  # already revising; wait for it to finish before queuing more
+            # already revising — do NOT advance the floor, or feedback that lands
+            # while the revision is in flight is lost. It re-surfaces next poll and
+            # is consumed once the current revision finishes.
+            return
 
         body = "\n".join(f"- {author}: {text}" for _, author, text in sorted(comments))
         rev = await self.db.create_task(
@@ -120,6 +121,8 @@ class GithubReviewIntake:
             repo=task.repo, source="github-review", parent_id=task.id,
             source_ref={"pr_url": task.pr_url},
         )
+        # only now that the feedback is consumed into a revision do we advance the floor
+        self._seen_since[task.pr_url] = max(ts for ts, _, _ in comments)
         logger.info("queued revision %s for PR review on task %s", rev.id, task.id)
 
 

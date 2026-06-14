@@ -176,6 +176,40 @@ async def test_review_polling_queues_revision(review_db, monkeypatch):
     assert len(revs2) == 1
 
 
+async def test_review_feedback_during_open_revision_is_not_lost(review_db, monkeypatch):
+    # feedback that arrives while a prior auto-revision is still in flight must not
+    # be swallowed by the seen-floor; it should be picked up once that revision ends
+    settings = get_settings()
+    monkeypatch.setattr(settings, "github_token", "ghp_x")
+    parent = await review_db.create_task("Add feature", "do it", repo="backend")
+    await review_db.update_task(parent.id, status="completed",
+                                pr_url="https://github.com/acme/backend/pull/5",
+                                finished_at=1.0)
+    intake = GithubReviewIntake(settings, review_db)
+
+    fb1 = {"submitted_at": "2026-06-12T10:00:00Z", "user": {"login": "alice"},
+           "author_association": "MEMBER", "body": "first feedback"}
+    _patch_gh(monkeypatch, [fb1])
+    await intake._poll_once()
+    revs = [t for t in await review_db.list_tasks() if t.parent_id == parent.id]
+    assert len(revs) == 1  # R1 queued
+
+    # second feedback arrives while R1 is still open (queued)
+    fb2 = {"submitted_at": "2026-06-12T11:00:00Z", "user": {"login": "bob"},
+           "author_association": "MEMBER", "body": "second feedback"}
+    _patch_gh(monkeypatch, [fb1, fb2])
+    await intake._poll_once()
+    revs = [t for t in await review_db.list_tasks() if t.parent_id == parent.id]
+    assert len(revs) == 1  # not queued again while R1 is open — and floor NOT advanced
+
+    # R1 finishes; the second feedback must now surface as R2 (not lost to the floor)
+    await review_db.update_task(revs[0].id, status="completed", finished_at=2.0)
+    await intake._poll_once()
+    revs = [t for t in await review_db.list_tasks() if t.parent_id == parent.id]
+    assert len(revs) == 2
+    assert any("second feedback" in r.description for r in revs)  # not lost to the floor
+
+
 async def test_review_polling_ignores_bot_and_old(review_db, monkeypatch):
     settings = get_settings()
     monkeypatch.setattr(settings, "github_token", "ghp_x")

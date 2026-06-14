@@ -2,8 +2,9 @@
 
 Prices are USD per million tokens (input, output), current as of 2026-06.
 They WILL drift — override any entry under `pricing:` in config/agents.yaml
-without touching code. Unknown models are tracked token-wise but priced at $0
-and flagged, so budget enforcement never silently miscounts a priced model.
+without touching code. Unknown models are flagged AND charged the priciest known
+rate (see `fallback_price`), so an unpriced or typo'd model id can never slip
+past the per-task and daily budgets by counting as $0.
 """
 
 from __future__ import annotations
@@ -68,18 +69,52 @@ def normalize_model_name(name: str) -> str:
     return name.strip()
 
 
+def _merged_table(overrides: dict[str, dict] | None = None
+                  ) -> dict[str, tuple[float, float]]:
+    """Default price table with any config `pricing:` overrides merged in.
+    Malformed or negative overrides are skipped (with a warning) rather than
+    crashing a task mid-run or silently producing a bogus (e.g. negative) cost."""
+    table = dict(DEFAULT_PRICING)
+    for key, spec in (overrides or {}).items():
+        if not (isinstance(spec, dict) and "input" in spec and "output" in spec):
+            continue
+        try:
+            p_in, p_out = float(spec["input"]), float(spec["output"])
+        except (TypeError, ValueError):
+            logger.warning("ignoring malformed pricing override for %r: %r", key, spec)
+            continue
+        if p_in < 0 or p_out < 0:
+            logger.warning("ignoring negative pricing override for %r: %r", key, spec)
+            continue
+        table[normalize_model_name(key)] = (p_in, p_out)
+    return table
+
+
 def lookup_price(model: str, overrides: dict[str, dict] | None = None
                  ) -> tuple[float, float] | None:
     """Return (input, output) $/MTok for a model, or None if unpriced."""
     name = normalize_model_name(model)
-    table = dict(DEFAULT_PRICING)
-    for key, spec in (overrides or {}).items():
-        if isinstance(spec, dict) and "input" in spec and "output" in spec:
-            table[normalize_model_name(key)] = (float(spec["input"]), float(spec["output"]))
+    table = _merged_table(overrides)
     for prefix in sorted(table, key=len, reverse=True):
         if name.startswith(prefix):
             return table[prefix]
     return None
+
+
+def fallback_price(overrides: dict[str, dict] | None = None) -> tuple[float, float]:
+    """Fail-safe price for a model absent from the table: the priciest known
+    input and output rates. An unknown/typo'd model id is then charged the
+    dearest plausible rate, so the per-task and daily budgets still bound it
+    (over-estimating cost is safe; pricing it at $0 would let it run unmetered).
+
+    Floored at the dearest *default* rate so that overriding an expensive model
+    to be cheap cannot lower the fail-safe ceiling (overrides can only raise it)."""
+    table = _merged_table(overrides)
+    max_in = max(max(p[0] for p in DEFAULT_PRICING.values()),
+                 max(p[0] for p in table.values()))
+    max_out = max(max(p[1] for p in DEFAULT_PRICING.values()),
+                  max(p[1] for p in table.values()))
+    return (max_in, max_out)
 
 
 def _cache_multipliers(model: str) -> dict[str, float]:
@@ -116,6 +151,7 @@ class CostTracker:
     cost_usd: float = 0.0
     unpriced_models: set[str] = field(default_factory=set)
     budget_warned: bool = False  # set once the 80% warning has been emitted
+    unpriced_warned: bool = False  # set once the unpriced-model warning has fired
 
     def add_usage(self, usage_metadata: dict, model_name: str | None = None) -> float:
         """Record one model response's usage_metadata. Returns the cost delta."""
@@ -127,8 +163,10 @@ class CostTracker:
 
         price = lookup_price(model, self.overrides)
         if price is None:
+            # fail-safe: flag it AND charge the priciest known rate so the budget
+            # still bounds it, rather than letting an unpriced model run unmetered
             self.unpriced_models.add(normalize_model_name(model))
-            return 0.0
+            price = fallback_price(self.overrides)
         p_in, p_out = price
         details = usage_metadata.get("input_token_details") or {}
         # Cache tokens are a subset of input_tokens. Clamp so a malformed usage

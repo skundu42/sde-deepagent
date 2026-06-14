@@ -77,14 +77,19 @@ class SlackIntake:
             if not text:
                 return
             repo, title, description = parse_task_text(text)
-            task = await self.db.create_task(
+            ts = event.get("ts")  # the message's own timestamp, unique per channel
+            # dedup on (channel, message ts) so a re-delivered socket-mode event
+            # doesn't create a second task
+            task = await self.db.create_task_if_new(
                 title=title, description=description, repo=repo, source="slack",
-                source_ref={"channel": channel,
-                            "thread_ts": event.get("thread_ts") or event.get("ts")},
+                source_ref={"channel": channel, "thread_ts": event.get("thread_ts") or ts},
+                dedup_key=f"slack:{channel}:{ts}",
             )
+            if task is None:
+                return  # already ingested
             await self._web.chat_postMessage(
                 channel=channel,
-                thread_ts=event.get("thread_ts") or event.get("ts"),
+                thread_ts=event.get("thread_ts") or ts,
                 text=f"🤖 Task `{task.id}` queued: {task.title}",
             )
 

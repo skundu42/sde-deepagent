@@ -20,17 +20,33 @@ function withToken(url) {
 
 function promptForToken() {
   const t = window.prompt("API token (auth is enabled on this server):");
-  if (t) { AUTH = t.trim(); sessionStorage.setItem("auth_token", AUTH); }
+  if (t) {
+    AUTH = t.trim();
+    sessionStorage.setItem("auth_token", AUTH);
+    onAuthChanged();
+  }
   return !!t;
 }
 
+/* EventSource can't carry a bearer token added after it was opened (the streams
+ * created at boot with an empty token stay 401'd), so when the token changes we
+ * tear down and re-open the live streams with the new one. */
+function onAuthChanged() {
+  connectGlobal();              // re-open the global stats/list stream
+  setTimeout(route, 0);         // re-render the current view -> re-subscribes taskES
+}
+
 async function api(path, opts = {}, _retried = false) {
+  const sentAuth = AUTH;
   const res = await fetch(path, {
     ...opts,
     headers: authHeaders({ "Content-Type": "application/json", ...(opts.headers || {}) }),
   });
-  if (res.status === 401 && !_retried && promptForToken()) {
-    return api(path, opts, true);
+  if (res.status === 401) {
+    // a concurrent request's prompt may have just set a token — retry with it
+    // instead of prompting again
+    if (AUTH !== sentAuth) return api(path, opts, _retried);
+    if (!_retried && promptForToken()) return api(path, opts, true);
   }
   if (!res.ok) {
     let detail = res.statusText;
@@ -100,6 +116,7 @@ function modelOptions(catalog, selected, emptyLabel) {
 
 let globalES = null;
 function connectGlobal() {
+  if (globalES) globalES.close();  // re-creatable so a new token can be applied
   globalES = new EventSource(withToken("/api/stream"));
   globalES.onopen = () => $("#conn").classList.add("on");
   globalES.onerror = () => $("#conn").classList.remove("on");
@@ -212,7 +229,7 @@ function renderEvent(ev) {
     body = `<div class="ev-text" style="color:${STATUS_COLOR[c.status] || "var(--ink)"}">▶ ${esc(c.status)}${c.error ? ` — ${esc(c.error)}` : ""}${c.usage?.cost_usd != null ? ` · $${c.usage.cost_usd.toFixed(4)} (${((c.usage.input_tokens + c.usage.output_tokens) / 1000).toFixed(0)}k tok)` : ""}${c.pr_url ? ` · <a href="${esc(c.pr_url)}" target="_blank">PR ↗</a>` : ""}</div>`
       + (c.summary ? `<details class="tool-out"><summary>final summary</summary><pre>${esc(c.summary)}</pre></details>` : "");
   else if (ev.kind === "tool_call")
-    body = `<div class="tool-call">$ <span class="tn">${esc(c.name)}</span>(<span class="ta">${esc(JSON.stringify(c.args)).slice(1, 400)}</span>)</div>`;
+    body = `<div class="tool-call">$ <span class="tn">${esc(c.name)}</span>(<span class="ta">${esc(JSON.stringify(c.args).slice(1, 400))}</span>)</div>`;
   else if (ev.kind === "tool_result")
     body = `<details class="tool-out"><summary>↳ ${esc(c.name || "result")}${c.truncated ? " (truncated)" : ""}</summary><pre>${esc(c.output)}</pre></details>`;
   else if (ev.kind === "pr_opened")

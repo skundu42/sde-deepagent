@@ -22,6 +22,7 @@ from .gitops import (
     prepare_workspace,
     prune_workspaces,
     push_branch,
+    workspace_root_for,
 )
 from .llm import build_model
 from .memory import memory_from_settings, repo_tag
@@ -39,7 +40,8 @@ TRUNCATE_RESULT = 2500
 class TaskRunner:
     def __init__(self, db: Database, bus: EventBus, cfg: ConfigStore, settings: Settings,
                  daily_budget: DailyBudget | None = None,
-                 secret_store: SecretStore | None = None):
+                 secret_store: SecretStore | None = None,
+                 checkpointer: Any = None):
         self.mailboxes: dict[str, list[str]] = {}  # task_id -> pending operator messages
         self._redactors: dict[str, Redactor] = {}  # task_id -> secret-value redactor
         self.db = db
@@ -52,6 +54,9 @@ class TaskRunner:
         # shared with the worker so launch-gating and mid-stream enforcement see
         # the same (persisted + in-flight) daily spend
         self.daily_budget = daily_budget or DailyBudget(db, settings.daily_budget_usd)
+        # persists agent state per task (thread_id=task.id) so a task interrupted
+        # by a restart can resume from its last checkpoint; None disables resume
+        self.checkpointer = checkpointer
 
     async def emit(self, task_id: str, kind: str, content: dict[str, Any],
                    agent: str = "orchestrator") -> None:
@@ -131,18 +136,25 @@ class TaskRunner:
         return names.pop() if len(names) == 1 else "subagent"
 
     async def _consume_stream(self, task: Task, built, tracker: CostTracker,
-                              budget_usd: float) -> str:
+                              budget_usd: float, resume: bool = False) -> str:
         """Stream the agent run, persisting events. Returns the final text."""
         call_map: dict[str, str] = {}  # tool_call_id -> subagent name
         active: dict[str, str] = {}    # task calls currently in flight
         final_text = ""
         seen_message_ids: set[str] = set()
 
+        config: dict[str, Any] = {"recursion_limit": self.settings.recursion_limit}
+        if self.checkpointer is not None:
+            # key checkpoints by task so a restart can resume this exact thread
+            config["configurable"] = {"thread_id": task.id}
+        # resume continues the persisted thread (input=None); a fresh run seeds it
+        stream_input = None if resume else {
+            "messages": [{"role": "user", "content": "Begin the task now."}]}
         stream = built.agent.astream(
-            {"messages": [{"role": "user", "content": "Begin the task now."}]},
+            stream_input,
             stream_mode="updates",
             subgraphs=True,
-            config={"recursion_limit": self.settings.recursion_limit},
+            config=config,
         )
         async for chunk in stream:
             ns: tuple = ()
@@ -184,6 +196,14 @@ class TaskRunner:
             if meta:
                 resp_meta = getattr(msg, "response_metadata", None) or {}
                 tracker.add_usage(meta, resp_meta.get("model_name"))
+                if tracker.unpriced_models and not tracker.unpriced_warned:
+                    tracker.unpriced_warned = True
+                    await self.emit(task.id, "log", {
+                        "text": "model(s) not in the price table — billed at the "
+                                "priciest known rate as a budget fail-safe: "
+                                + ", ".join(sorted(tracker.unpriced_models))
+                                + " (add a pricing: override in agents.yaml for "
+                                "accurate cost)"})
                 await self._enforce_budget(task, tracker, budget_usd)
                 await self._enforce_daily_budget()
             text = self._text_of(msg)
@@ -252,8 +272,12 @@ class TaskRunner:
     async def _finalize(self, task: Task, built) -> str | None:
         """Ensure committed work ends up in a PR. Returns the PR URL if any."""
         ws = built.workspace
-        if built.result.get("pr_url"):
-            return built.result["pr_url"]
+        # built.result is rebuilt empty on a resumed run, so fall back to the PR
+        # URL the interrupted run already persisted — avoids a redundant push/PR
+        # round-trip (GitHub would 422 a duplicate anyway, but skip the work)
+        existing_pr = built.result.get("pr_url") or task.pr_url
+        if existing_pr:
+            return existing_pr
         dirty = await has_changes(ws)
         ahead = await commits_ahead(ws)
         if not dirty and ahead == 0:
@@ -365,8 +389,10 @@ class TaskRunner:
                 if not parent or not parent.branch:
                     raise GitError(f"cannot revise: parent task {task.parent_id} "
                                    "not found or never produced a branch")
-                if not task.repo:
-                    task.repo = parent.repo
+                # a revision continues the parent's branch, so it MUST target the
+                # parent's repo — a mismatched explicit repo would clone the wrong
+                # codebase and fail to find the branch
+                task.repo = parent.repo
             repo = await self.resolve_repo(task)
             if task.repo != repo.name:
                 await self.db.update_task(task.id, repo=repo.name)
@@ -388,9 +414,27 @@ class TaskRunner:
                 await self.emit(task.id, "log", {
                     "text": "repo secrets not available, skipped: "
                             + ", ".join(missing_secrets)})
-            await self.emit(task.id, "log", {"text": f"cloning {repo.name} ({repo.url})"})
+            # resume-after-restart: only when a durable checkpoint for this task
+            # exists AND its workspace clone is still on disk (so the agent's
+            # recorded edits match reality). Otherwise start clean, clearing any
+            # stale checkpoint so a fresh run doesn't append to dead state.
+            resume = False
+            if self.checkpointer is not None and not parent:
+                thread_cfg = {"configurable": {"thread_id": task.id}}
+                has_ckpt = await self.checkpointer.aget_tuple(thread_cfg) is not None
+                ws_exists = (workspace_root_for(self.settings, repo.name, task.id)
+                             / "repo" / ".git").is_dir()
+                resume = has_ckpt and ws_exists
+                if has_ckpt and not resume:
+                    await self.checkpointer.adelete_thread(task.id)
+                if resume:
+                    await self.emit(task.id, "log",
+                                    {"text": "resuming from checkpoint after restart"})
+            verb = "resuming" if resume else "cloning"
+            await self.emit(task.id, "log", {"text": f"{verb} {repo.name} ({repo.url})"})
             ws = await prepare_workspace(task.id, task.title, repo, self.settings,
-                                         existing_branch=parent.branch if parent else None)
+                                         existing_branch=parent.branch if parent else None,
+                                         reuse_existing=resume)
             await self.db.update_task(task.id, branch=ws.branch)
             task.branch = ws.branch
             await self.emit(task.id, "log",
@@ -468,6 +512,13 @@ class TaskRunner:
                 default_model=task.model or agents_cfg.orchestrator_model,
                 overrides=agents_cfg.pricing,
             )
+            if resume:
+                # carry forward spend the interrupted run already persisted so the
+                # per-task budget continues from there instead of restarting at $0
+                # (replayed-from-checkpoint calls bill no new tokens)
+                tracker.cost_usd = task.cost_usd or 0.0
+                tracker.input_tokens = task.input_tokens or 0
+                tracker.output_tokens = task.output_tokens or 0
             # count this task's spend toward the daily cap while it runs, before
             # its cost is persisted at the end of the run
             self.daily_budget.track(task.id, tracker)
@@ -493,7 +544,8 @@ class TaskRunner:
                 require_approval=require_approval,
                 drain_messages=lambda: self._drain_mailbox(task.id),
                 secrets=secrets,
-                redactor=self._redactors.get(task.id))
+                redactor=self._redactors.get(task.id),
+                checkpointer=self.checkpointer)
             await self.emit(task.id, "log", {
                 "text": f"agent started (orchestrator={task.model or agents_cfg.orchestrator_model}, "
                         f"subagents={', '.join(s.name for s in agents_cfg.subagents)}"
@@ -501,7 +553,7 @@ class TaskRunner:
                         + (", sandboxed" if sandboxed else "") + ")"})
 
             final_text = await asyncio.wait_for(
-                self._consume_stream(task, built, tracker, budget),
+                self._consume_stream(task, built, tracker, budget, resume=resume),
                 timeout=self.settings.task_timeout_seconds,
             )
 
@@ -556,6 +608,15 @@ class TaskRunner:
             self.mailboxes.pop(task.id, None)
             self._redactors.pop(task.id, None)
             self.daily_budget.untrack(task.id)  # cost is now persisted in the DB
+            # reaching finally means the run ended (completed/failed/cancelled/
+            # awaiting_approval) — a checkpoint is only needed to resume a run the
+            # process *died* inside (where finally never runs), so drop it here to
+            # keep checkpoints.sqlite bounded
+            if self.checkpointer is not None:
+                try:
+                    await self.checkpointer.adelete_thread(task.id)
+                except Exception:  # noqa: BLE001 — cleanup must not mask the outcome
+                    logger.exception("failed to delete checkpoint for task %s", task.id)
             if sandboxed:
                 # the container stays up for reuse; restamp its idle clock so
                 # the reaper counts the 7-day TTL from this task's end

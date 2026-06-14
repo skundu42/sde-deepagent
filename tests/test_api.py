@@ -75,6 +75,26 @@ async def test_task_unknown_repo_rejected(client):
     assert r.status_code == 400
 
 
+async def test_task_bad_model_rejected_at_creation(client):
+    # a per-task model override is validated up front, not deep inside run()
+    r = await client.post("/api/tasks", json={"title": "x", "model": "not-a-real-model"})
+    assert r.status_code == 400
+    r = await client.post("/api/tasks", json={"title": "x", "model": "anthropic:claude-x"})
+    assert r.status_code == 201  # known provider prefix is accepted
+
+
+async def test_cancel_queued_emits_status_event_and_finished_at(client):
+    task = (await client.post("/api/tasks", json={"title": "cancel me"})).json()
+    r = await client.post(f"/api/tasks/{task['id']}/cancel")
+    assert r.status_code == 200 and r.json()["status"] == "cancelled"
+
+    # the cancellation is broadcast (so the live UI updates) and finished_at is set
+    events = (await client.get(f"/api/tasks/{task['id']}/events")).json()
+    assert any(e["kind"] == "status" and e["content"].get("status") == "cancelled"
+               for e in events)
+    assert (await client.get(f"/api/tasks/{task['id']}")).json()["finished_at"] is not None
+
+
 async def test_events_endpoint(client):
     r = await client.post("/api/tasks", json={"title": "evt task"})
     task_id = r.json()["id"]

@@ -20,6 +20,7 @@ from . import __version__
 from .agent_factory import validate_models
 from .bus import EventBus
 from .chat import ChatService
+from .checkpointing import open_checkpointing
 from .config import ConfigStore, RepoConfig, is_safe_context_pattern
 from .db import Database
 from .intake.linear import LinearIntake
@@ -111,7 +112,10 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     validate_control_plane_security(settings)
     db = Database(settings.db_path)
-    await db.connect()
+    # agent-state checkpointer (durable when langgraph-checkpoint-sqlite is present);
+    # lets a task interrupted by a restart resume from its last checkpoint
+    ckpt = await open_checkpointing(settings) if settings.checkpoint_resume else None
+    await db.connect(resume_interrupted=bool(ckpt and ckpt.durable))
     bus = EventBus()
     cfg = ConfigStore(settings.config_dir)
     # one daily-budget accountant shared by the runner (mid-stream enforcement)
@@ -119,7 +123,8 @@ async def lifespan(app: FastAPI):
     daily_budget = DailyBudget(db, settings.daily_budget_usd)
     secret_store = SecretStore(settings.secrets_store_path, settings.secrets_key)
     runner = TaskRunner(db, bus, cfg, settings, daily_budget=daily_budget,
-                        secret_store=secret_store)
+                        secret_store=secret_store,
+                        checkpointer=ckpt.saver if ckpt else None)
     worker = Worker(db, runner, max_concurrent=settings.max_concurrent_tasks,
                     settings=settings, daily_budget=daily_budget)
 
@@ -175,6 +180,8 @@ async def lifespan(app: FastAPI):
         if review_intake:
             await review_intake.stop()
         await db.close()
+        if ckpt:
+            await ckpt.aclose()
 
 
 def create_app() -> FastAPI:
@@ -241,6 +248,12 @@ def create_app() -> FastAPI:
         repos = request.app.state.cfg.repos()
         if body.repo and body.repo not in repos:
             raise HTTPException(400, f"unknown repo '{body.repo}'")
+        if body.model:  # validate the per-task override now, not deep inside run()
+            from .llm import normalize_model_id
+            try:
+                normalize_model_id(body.model)
+            except ValueError as e:
+                raise HTTPException(400, f"invalid model '{body.model}': {e}")
         repo = body.repo
         if body.parent_id:
             parent = await request.app.state.db.get_task(body.parent_id)
@@ -271,7 +284,11 @@ def create_app() -> FastAPI:
         if not task:
             raise HTTPException(404, "task not found")
         if task.status in ("queued", "awaiting_approval"):
-            await db.update_task(task_id, status="cancelled")
+            import time as _time
+            await db.update_task(task_id, status="cancelled",
+                                 finished_at=_time.time())
+            event = await db.add_event(task_id, "status", {"status": "cancelled"})
+            request.app.state.bus.publish(task_id, event)  # so the UI updates live
             return {"status": "cancelled"}
         if task.status == "running":
             if request.app.state.worker.cancel_task(task_id):

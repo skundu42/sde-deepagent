@@ -44,7 +44,6 @@ class LinearIntake:
         self.settings = settings
         self.db = db
         self._task: asyncio.Task | None = None
-        self._seen: set[str] = set()
 
     def start(self) -> None:
         self._task = asyncio.create_task(self._poll_loop(), name="linear-intake")
@@ -57,16 +56,6 @@ class LinearIntake:
     def _headers(self) -> dict[str, str]:
         return {"Authorization": self.settings.linear_api_key or "",
                 "Content-Type": "application/json"}
-
-    async def _already_tracked(self, issue_id: str) -> bool:
-        if issue_id in self._seen:
-            return True
-        # survive restarts: check the DB for a task referencing this issue
-        for t in await self.db.list_tasks(limit=500):
-            if t.source == "linear" and t.source_ref.get("issue_id") == issue_id:
-                self._seen.add(issue_id)
-                return True
-        return False
 
     async def _poll_loop(self) -> None:
         async with httpx.AsyncClient(timeout=30) as client:
@@ -97,17 +86,19 @@ class LinearIntake:
                 await asyncio.sleep(self.settings.linear_poll_seconds)
 
     async def ingest_issue(self, client: httpx.AsyncClient, issue: dict) -> None:
-        if await self._already_tracked(issue["id"]):
-            return
-        self._seen.add(issue["id"])
         description = issue.get("description") or ""
-        task = await self.db.create_task(
+        # dedup on the issue id, atomically — survives restarts (no 500-row scan
+        # limit) and closes the poll-vs-webhook race that could double-ingest
+        task = await self.db.create_task_if_new(
             title=f"{issue['identifier']}: {issue['title']}",
             description=f"{issue['title']}\n\n{description}\n\nLinear issue: {issue['url']}",
             source="linear",
             source_ref={"issue_id": issue["id"], "identifier": issue["identifier"],
                         "url": issue["url"]},
+            dedup_key=f"linear:{issue['id']}",
         )
+        if task is None:
+            return  # already picked up
         await self._comment(client, issue["id"],
                             f"🤖 sde-deepagent picked this up as task `{task.id}`.")
         logger.info("linear issue %s -> task %s", issue["identifier"], task.id)

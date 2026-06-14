@@ -4,7 +4,7 @@
 
 Built on [LangChain deepagents](https://docs.langchain.com/oss/python/deepagents/overview). Bring a model API key (Anthropic, Google Gemini, and/or OpenAI) and Docker for the default sandboxed execution path; everything else — queue, storage, UI, event streaming, long-term memory — runs on your own infrastructure.
 
-![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue) ![self--hosted](https://img.shields.io/badge/deployment-self--hosted-green) ![tests](https://img.shields.io/badge/tests-230%20passing-brightgreen) ![license](https://img.shields.io/badge/license-MIT-blue)
+![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue) ![self--hosted](https://img.shields.io/badge/deployment-self--hosted-green) ![tests](https://img.shields.io/badge/tests-259%20passing-brightgreen) ![license](https://img.shields.io/badge/license-MIT-blue)
 
 ---
 

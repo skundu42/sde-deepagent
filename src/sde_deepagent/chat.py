@@ -24,6 +24,20 @@ logger = logging.getLogger(__name__)
 
 MAX_HISTORY_MESSAGES = 60
 
+
+def _safe_trim(messages: list, limit: int) -> list:
+    """Keep the most recent `limit` messages without orphaning a tool result.
+
+    A naive `messages[-limit:]` can begin the window on a ToolMessage whose
+    preceding AIMessage (with the matching tool_calls) was cut off; providers
+    reject a tool_result with no preceding tool_use, which permanently poisons the
+    session. Start the window at the first HumanMessage (a turn boundary) instead."""
+    window = messages[-limit:]
+    for i, m in enumerate(window):
+        if getattr(m, "type", "") == "human":
+            return window[i:]
+    return window
+
 CHAT_PROMPT = """\
 You are the sde-deepagent assistant. sde-deepagent is a software developer agent system:
 tasks come in from the UI/Telegram/Slack/Linear, an orchestrator agent (with
@@ -178,7 +192,7 @@ class ChatService:
         result = await agent.ainvoke({"messages": list(history)},
                                      config={"recursion_limit": 40})
         messages = result.get("messages", [])
-        self.sessions[session_id] = messages[-MAX_HISTORY_MESSAGES:]
+        self.sessions[session_id] = _safe_trim(messages, MAX_HISTORY_MESSAGES)
 
         # chat spend counts against the daily budget like everything else
         tracker = CostTracker(default_model=model_id, overrides=agents_cfg.pricing)

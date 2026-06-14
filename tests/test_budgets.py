@@ -53,6 +53,24 @@ async def test_enforce_budget_warns_then_raises(temp_env):
     assert not t2.budget_warned
 
 
+async def test_unpriced_model_trips_task_budget(temp_env):
+    # fail-safe: a model id that's absent from the price table (typo, brand-new
+    # model) must still be bounded by the per-task budget, not run unmetered.
+    from sde_deepagent.runner import TaskRunner
+
+    runner = TaskRunner.__new__(TaskRunner)
+    runner.emit = _Emits().emit  # type: ignore[method-assign]
+
+    class FakeTask:
+        id = "t1"
+
+    tracker = CostTracker(default_model="mystery-llm-v9")  # not in the price table
+    tracker.add_usage({"input_tokens": 1_000_000, "output_tokens": 0})
+    assert tracker.cost_usd > 0  # charged at the fail-safe rate, not $0
+    with pytest.raises(BudgetExceeded):
+        await runner._enforce_budget(FakeTask, tracker, budget_usd=1.0)
+
+
 # ---- daily budget gate in the worker ----
 
 @pytest.fixture

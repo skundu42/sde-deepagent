@@ -1,8 +1,10 @@
 import pytest
 
 from sde_deepagent.pricing import (
+    DEFAULT_PRICING,
     BudgetExceeded,
     CostTracker,
+    fallback_price,
     lookup_price,
     normalize_model_name,
 )
@@ -87,12 +89,52 @@ def test_cost_tracker_per_message_model():
     assert t.cost_usd == pytest.approx(0.30)  # priced as flash, not sonnet
 
 
-def test_cost_tracker_unpriced_flagged_not_charged():
+def test_cost_tracker_unpriced_charged_failsafe_and_flagged():
+    # fail-safe: an unknown model must NOT be free, or it would slip past the
+    # per-task and daily budgets entirely (a typo'd model id = unmetered spend).
+    # It is charged the priciest known input/output rate — the budget then
+    # over-estimates rather than under-counts — while still being flagged so the
+    # operator knows to add real pricing.
+    max_in = max(p[0] for p in DEFAULT_PRICING.values())
+    max_out = max(p[1] for p in DEFAULT_PRICING.values())
     t = CostTracker(default_model="weird:model-x")
-    t.add_usage({"input_tokens": 5000, "output_tokens": 100})
-    assert t.cost_usd == 0.0
+    delta = t.add_usage({"input_tokens": 5000, "output_tokens": 100})
+    assert delta == pytest.approx((5000 * max_in + 100 * max_out) / 1_000_000)
+    assert delta > 0
     assert t.input_tokens == 5000
     assert "model-x" in t.summary()["unpriced_models"]
+
+
+def test_unpriced_failsafe_tracks_override_ceiling():
+    # a pricey custom model in overrides raises the fail-safe ceiling too, so an
+    # unknown model can never be cheaper to (mis)count than the dearest configured one
+    over = {"ultra-expensive": {"input": 100.0, "output": 500.0}}
+    t = CostTracker(default_model="brand-new-unknown", overrides=over)
+    t.add_usage({"input_tokens": 1_000_000, "output_tokens": 0})
+    assert t.cost_usd == pytest.approx(100.0)  # 1M input @ the $100/MTok override max
+
+
+def test_malformed_and_negative_overrides_are_skipped_not_crashed():
+    over = {"weird-x": {"input": "not_a_number", "output": 5.0},  # malformed
+            "neg-y": {"input": -1.0, "output": 2.0},             # negative
+            "ok-z": {"input": 4.0, "output": 8.0}}               # valid
+    # known models still price normally; bad entries are ignored, not fatal
+    assert lookup_price("claude-sonnet-4-6", over) == (3.0, 15.0)
+    assert lookup_price("ok-z", over) == (4.0, 8.0)
+    assert lookup_price("weird-x", over) is None  # malformed -> not registered
+    assert lookup_price("neg-y", over) is None    # negative -> not registered
+    # a bad override must not crash cost tracking for an unknown model
+    t = CostTracker(default_model="weird-x", overrides=over)
+    assert t.add_usage({"input_tokens": 1000, "output_tokens": 0}) > 0
+
+
+def test_cheap_override_cannot_lower_failsafe_ceiling():
+    base = fallback_price()
+    # overriding the dearest model to be cheap must NOT lower the fail-safe ceiling
+    cheap = {"gpt-5.5-pro": {"input": 0.01, "output": 0.01}}
+    assert fallback_price(cheap) == base
+    # but a pricier custom model DOES raise it
+    assert fallback_price({"ultra": {"input": 999.0, "output": 1000.0}}) == (999.0, 1000.0)
 
 
 def test_budget_exceeded_message():

@@ -182,6 +182,9 @@ JUNK_EXCLUDES = [
     "__pycache__/", "*.pyc", "*.pyo", ".pytest_cache/", ".mypy_cache/",
     ".ruff_cache/", "*.egg-info/", ".coverage", "node_modules/", "dist/",
     "build/", ".DS_Store", "*.swp", ".venv/", "venv/",
+    # deepagents' summarization middleware offloads evicted history here (inside
+    # the backend root = the repo clone); never let it leak into a commit/PR
+    "conversation_history/",
 ]
 
 
@@ -203,7 +206,7 @@ def legacy_workspace_root_for(settings: Settings, repo_name: str, task_id: str) 
 
 async def prepare_workspace(
     task_id: str, title: str, repo: RepoConfig, settings: Settings,
-    existing_branch: str | None = None,
+    existing_branch: str | None = None, *, reuse_existing: bool = False,
 ) -> Workspace:
     """Clone the repo into a fresh per-task workspace.
 
@@ -216,10 +219,17 @@ async def prepare_workspace(
     that covers every task workspace for that repo — and only that repo. The
     repo slug is collision-resistant, so distinct names get distinct parents."""
     ws_root = workspace_root_for(settings, repo.name, task_id)
+    repo_dir = ws_root / "repo"
+    control_dir = control_git_dir_for(settings, repo.name, task_id)
+    if reuse_existing and (repo_dir / ".git").is_dir() and control_dir.exists():
+        # resume after a restart: reuse the existing clone (preserving the agent's
+        # uncommitted edits) and the trusted control-git copy made on the first run
+        branch = existing_branch or branch_name_for(task_id, title)
+        return Workspace(task_id=task_id, repo=repo, path=repo_dir, branch=branch,
+                         control_git_dir=control_dir)
     if ws_root.exists():
         shutil.rmtree(ws_root)
     ws_root.mkdir(parents=True)
-    repo_dir = ws_root / "repo"
 
     # the remote URL stays token-free; auth rides in process-scoped env config
     env = _git_env(auth_env(
@@ -249,6 +259,14 @@ async def prepare_workspace(
 
     if existing_branch:
         branch = existing_branch
+        # the revision clone is single-branch (--depth implies --single-branch), so
+        # it lacks origin/<default_branch> — which commits_ahead()/diff_stat()
+        # compare against. Fetch that ref so finalize and the approval gate see the
+        # revision's commits instead of silently reading 0 ahead and dropping work.
+        if repo.default_branch != existing_branch:
+            await git(["fetch", "--depth", "50", "origin",
+                       f"{repo.default_branch}:refs/remotes/origin/{repo.default_branch}"],
+                      cwd=repo_dir, check=False, env=env)
     else:
         branch = branch_name_for(task_id, title)
         await git(["checkout", "-b", branch], cwd=repo_dir, env=_git_env())
@@ -260,7 +278,6 @@ async def prepare_workspace(
     # Controller Git operations use a protected copy of the freshly-created
     # metadata. The sandbox can mutate repo/.git freely, but the host never
     # executes or trusts it after this point.
-    control_dir = control_git_dir_for(settings, repo.name, task_id)
     if control_dir.exists():
         shutil.rmtree(control_dir)
     control_dir.parent.mkdir(parents=True, exist_ok=True)

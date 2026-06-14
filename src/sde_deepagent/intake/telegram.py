@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 
 import httpx
 
@@ -14,6 +15,15 @@ from ..settings import Settings
 from .base import parse_task_text, task_summary
 
 logger = logging.getLogger(__name__)
+
+# a leading /task command, optionally with the @botname suffix Telegram appends in
+# group chats. Requires a word boundary so `/taskfoo` (a different command) is left alone.
+_TASK_CMD_RE = re.compile(r"^/task(?:@\w+)?(?:\s+|$)")
+
+
+def _strip_task_command(text: str) -> str:
+    m = _TASK_CMD_RE.match(text)
+    return text[m.end():].strip() if m else text
 
 
 class TelegramIntake:
@@ -83,18 +93,23 @@ class TelegramIntake:
                              "Send me a dev task. Optionally target a repo with "
                              "`[repo-name] your task...`. I'll reply with a PR when done.")
             return
-        if text.startswith("/task"):
-            text = text[len("/task"):].strip()
+        text = _strip_task_command(text)
         if not text:
             return
         repo, title, description = parse_task_text(text)
-        task = await self.db.create_task(
+        message_id = msg.get("message_id")
+        # dedup on (chat, message): the long-poll offset resets to 0 on restart, so
+        # an update handled just before a restart is re-delivered — don't re-run it
+        task = await self.db.create_task_if_new(
             title=title, description=description, repo=repo, source="telegram",
-            source_ref={"chat_id": chat_id, "message_id": msg.get("message_id")},
+            source_ref={"chat_id": chat_id, "message_id": message_id},
+            dedup_key=f"telegram:{chat_id}:{message_id}",
         )
+        if task is None:
+            return  # already ingested
         await self._send(client, chat_id,
                          f"🤖 Task `{task.id}` queued: {task.title}",
-                         reply_to=msg.get("message_id"))
+                         reply_to=message_id)
 
     async def _send(self, client: httpx.AsyncClient, chat_id: int, text: str,
                     reply_to: int | None = None) -> None:

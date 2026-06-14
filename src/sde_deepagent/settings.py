@@ -78,6 +78,11 @@ class Settings(BaseSettings):
     require_approval: bool = False  # global default: hold work for approval before push/PR
     workspace_retention: int = 10  # keep N most recent task workspaces on disk
 
+    # --- crash resume ---
+    # (history summarization near the context limit is already on by default via
+    # deepagents' built-in summarization middleware — nothing to configure here)
+    checkpoint_resume: bool = True       # persist agent state; resume interrupted tasks after a restart
+
     # --- sandboxing (one container per repo, reused across tasks) ---
     # Zero-config by default: every repo's tasks run in that repo's container
     # (needs Docker; SANDBOX_DEFAULT=false to run on the host instead), and the

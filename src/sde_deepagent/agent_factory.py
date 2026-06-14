@@ -232,6 +232,7 @@ async def build_agent(
     drain_messages: Callable[[], list[str]] | None = None,
     secrets: dict[str, str] | None = None,
     redactor: Redactor | None = None,
+    checkpointer: Any = None,
 ) -> BuiltAgent:
     # masks any repo secret value that surfaces through the agent's own shell or
     # file reads (its env is secret-free, but test code could write one out)
@@ -320,12 +321,18 @@ async def build_agent(
         context_block=build_context_block(ws.path, repo, settings),
     ) + memory_prompt
 
+    # NB: history summarization near the context limit is already provided by
+    # create_deep_agent's default middleware stack (deepagents'
+    # _DeepAgentsSummarizationMiddleware — backend-offloaded, model-aware
+    # trigger), so we don't add our own. The checkpointer persists agent state
+    # for resume-after-restart when one is supplied.
     agent = create_deep_agent(
         model=orchestrator_model,
         tools=tools,
         system_prompt=system_prompt,
         subagents=subagents,
         backend=backend,
+        checkpointer=checkpointer,
         name="sde-deepagent-orchestrator",
     )
     return BuiltAgent(agent=agent, workspace=ws, result=result)

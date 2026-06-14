@@ -43,13 +43,19 @@ def mount_company_context(repo_path: Path, settings: Settings) -> list[str]:
     src = settings.context_dir
     if not src.exists() or not src.is_dir():
         return []
-    files = [p for p in sorted(src.rglob("*")) if p.is_file() and not p.name.startswith(".")]
+    # skip dotfiles/dotdirs entirely — both in the listing AND the copy. Copying
+    # the whole tree while only filtering the *listing* would silently materialize
+    # a `.env`/`.hidden/` into the agent's workspace (readable by its file tools)
+    # while hiding it from the prompt.
+    files = [p for p in sorted(src.rglob("*"))
+             if p.is_file()
+             and not any(part.startswith(".") for part in p.relative_to(src).parts)]
     if not files:
         return []
     dest = repo_path / CONTEXT_MOUNT
     if dest.exists():
         shutil.rmtree(dest)
-    shutil.copytree(src, dest)
+    shutil.copytree(src, dest, ignore=shutil.ignore_patterns(".*"))
     exclude = repo_path / ".git" / "info" / "exclude"
     if exclude.parent.exists():
         with exclude.open("a") as f:

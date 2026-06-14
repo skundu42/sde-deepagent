@@ -33,4 +33,7 @@ def task_summary(task: Task) -> str:
                 f"needed or the task was blocked): {task.title}")
     if task.status == "cancelled":
         return f"🚫 Task {task.id} was cancelled: {task.title}"
+    if task.status == "awaiting_approval":
+        return (f"⏸ Task {task.id} is ready and awaiting your approval before it "
+                f"ships: {task.title}")
     return f"❌ Task {task.id} failed: {task.title}\nError: {task.error or 'unknown'}"

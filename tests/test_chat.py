@@ -3,10 +3,32 @@
 import httpx
 import pytest
 
-from sde_deepagent.chat import ChatService, make_chat_tools
+from sde_deepagent.chat import ChatService, _safe_trim, make_chat_tools
 from sde_deepagent.config import ConfigStore
 from sde_deepagent.db import Database
 from sde_deepagent.settings import get_settings
+
+
+def test_safe_trim_does_not_orphan_tool_results():
+    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+    msgs = [
+        AIMessage(content="", tool_calls=[
+            {"name": "x", "args": {}, "id": "c0", "type": "tool_call"}]),
+        ToolMessage(content="r", tool_call_id="c0"),  # orphaned if it heads the window
+        HumanMessage(content="q1"),
+        AIMessage(content="a1"),
+    ]
+    # naive msgs[-3:] begins on the orphaned ToolMessage (which providers reject)
+    out = _safe_trim(msgs, 3)
+    assert getattr(out[0], "type", "") == "human"
+    assert out == msgs[2:]
+
+
+def test_safe_trim_keeps_recent_within_limit():
+    from langchain_core.messages import HumanMessage
+    msgs = [HumanMessage(content=str(i)) for i in range(100)]
+    out = _safe_trim(msgs, 60)
+    assert len(out) == 60 and out[-1].content == "99"
 
 
 @pytest.fixture
