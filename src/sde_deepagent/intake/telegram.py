@@ -7,12 +7,16 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from typing import TYPE_CHECKING
 
 import httpx
 
 from ..db import Database, Task
 from ..settings import Settings
-from .base import parse_task_text, task_summary
+from .base import parse_ask, parse_task_text, task_summary
+
+if TYPE_CHECKING:
+    from ..chat import ChatService
 
 logger = logging.getLogger(__name__)
 
@@ -27,9 +31,11 @@ def _strip_task_command(text: str) -> str:
 
 
 class TelegramIntake:
-    def __init__(self, settings: Settings, db: Database):
+    def __init__(self, settings: Settings, db: Database,
+                 chat: "ChatService | None" = None):
         self.settings = settings
         self.db = db
+        self.chat = chat  # answers /ask questions over tasks + memory
         self.token = settings.telegram_bot_token
         self.api = f"https://api.telegram.org/bot{self.token}"
         self.allowed = settings.telegram_allowed_chat_ids()
@@ -91,7 +97,14 @@ class TelegramIntake:
         if text in ("/start", "/help"):
             await self._send(client, chat_id,
                              "Send me a dev task. Optionally target a repo with "
-                             "`[repo-name] your task...`. I'll reply with a PR when done.")
+                             "`[repo-name] your task...`. I'll reply with a PR when done.\n"
+                             "Use `/ask <question>` to ask about past/running tasks or "
+                             "this codebase's knowledge base (no task is created).")
+            return
+        # /ask answers questions over tasks + memory instead of creating a task
+        question = parse_ask(text)
+        if question is not None:
+            await self._handle_ask(client, chat_id, question, msg.get("message_id"))
             return
         text = _strip_task_command(text)
         if not text:
@@ -110,6 +123,26 @@ class TelegramIntake:
         await self._send(client, chat_id,
                          f"🤖 Task `{task.id}` queued: {task.title}",
                          reply_to=message_id)
+
+    async def _handle_ask(self, client: httpx.AsyncClient, chat_id: int,
+                          question: str, reply_to: int | None = None) -> None:
+        if self.chat is None:
+            await self._send(client, chat_id, "Chat isn't available on this server.",
+                             reply_to=reply_to)
+            return
+        if not question:
+            await self._send(client, chat_id,
+                             "Ask a question after /ask, e.g. "
+                             "`/ask what did task abc123 do?`", reply_to=reply_to)
+            return
+        try:
+            # one conversational session per chat (grounded in tasks + memory)
+            res = await self.chat.ask(question, session_id=f"telegram:{chat_id}")
+            reply = res.get("reply") or "(no reply)"
+        except Exception:  # noqa: BLE001 — a chat error must not kill the poll loop
+            logger.exception("telegram /ask failed for chat %s", chat_id)
+            reply = "Sorry — I couldn't answer that right now."
+        await self._send(client, chat_id, reply, reply_to=reply_to)
 
     async def _send(self, client: httpx.AsyncClient, chat_id: int, text: str,
                     reply_to: int | None = None) -> None:

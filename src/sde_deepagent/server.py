@@ -128,11 +128,14 @@ async def lifespan(app: FastAPI):
     worker = Worker(db, runner, max_concurrent=settings.max_concurrent_tasks,
                     settings=settings, daily_budget=daily_budget)
 
+    # one chat assistant, shared by the /api/chat route and the Telegram/Slack
+    # `/ask` command (grounded in task records, traces, and long-term memory)
+    chat = ChatService(db, cfg, settings)
     intakes: list[Any] = []
     if settings.telegram_bot_token:
-        intakes.append(TelegramIntake(settings, db))
+        intakes.append(TelegramIntake(settings, db, chat=chat))
     if settings.slack_bot_token and settings.slack_app_token:
-        intakes.append(SlackIntake(settings, db))
+        intakes.append(SlackIntake(settings, db, chat=chat))
     linear: LinearIntake | None = None
     if settings.linear_api_key:
         linear = LinearIntake(settings, db)
@@ -163,7 +166,7 @@ async def lifespan(app: FastAPI):
     app.state.cfg = cfg
     app.state.worker = worker
     app.state.secret_store = secret_store
-    app.state.chat = ChatService(db, cfg, settings)
+    app.state.chat = chat
     app.state.memory = memory_from_settings(settings)
     app.state.linear = linear
     app.state.intakes = intakes

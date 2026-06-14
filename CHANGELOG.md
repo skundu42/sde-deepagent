@@ -8,6 +8,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`/ask` in Slack & Telegram.** Mention/DM (Slack) or send (Telegram)
+  `/ask <question>` to query the chat assistant about any past or running task and
+  the long-term memory/knowledge base, instead of creating a task. Each chat/thread
+  is its own conversational session; the same allowlist that gates task creation
+  gates `/ask`.
 - **Crash resume.** Agent state is now persisted to a SQLite checkpoint DB
   (`data/checkpoints.sqlite`) keyed per task, so a task interrupted by a server
   restart resumes from its last checkpoint instead of being marked failed — the

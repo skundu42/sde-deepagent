@@ -10,6 +10,18 @@ from ..db import Task
 # or  "repo=backend fix the login bug"
 REPO_PREFIX_RE = re.compile(r"^\s*(?:\[(?P<a>[\w./-]+)\]|repo=(?P<b>[\w./-]+))\s*[:,-]?\s*")
 
+# `/ask <question>` routes to the chat assistant instead of creating a task. The
+# optional @botname suffix is what Telegram appends to commands in group chats.
+ASK_PREFIX_RE = re.compile(r"^/ask(?:@\w+)?(?:\s+|$)", re.IGNORECASE)
+
+
+def parse_ask(text: str) -> str | None:
+    """If `text` is an `/ask` command, return the question (possibly empty);
+    otherwise None (it's a normal task message)."""
+    text = text.strip()
+    m = ASK_PREFIX_RE.match(text)
+    return text[m.end():].strip() if m else None
+
 
 def parse_task_text(text: str) -> tuple[str | None, str, str]:
     """Split an incoming message into (repo|None, title, description)."""

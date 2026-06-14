@@ -4,7 +4,7 @@
 
 Built on [LangChain deepagents](https://docs.langchain.com/oss/python/deepagents/overview). Bring a model API key (Anthropic, Google Gemini, and/or OpenAI) and Docker for the default sandboxed execution path; everything else — queue, storage, UI, event streaming, long-term memory — runs on your own infrastructure.
 
-![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue) ![self--hosted](https://img.shields.io/badge/deployment-self--hosted-green) ![tests](https://img.shields.io/badge/tests-259%20passing-brightgreen) ![license](https://img.shields.io/badge/license-MIT-blue)
+![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue) ![self--hosted](https://img.shields.io/badge/deployment-self--hosted-green) ![tests](https://img.shields.io/badge/tests-262%20passing-brightgreen) ![license](https://img.shields.io/badge/license-MIT-blue)
 
 ---
 
@@ -20,7 +20,7 @@ Built on [LangChain deepagents](https://docs.langchain.com/oss/python/deepagents
 | **Company context** | per-repo doc globs, convention files (`AGENTS.md`, `CLAUDE.md`, …), a global `context/` folder, and a Resources page that ingests any URL or text |
 | **Cost control** | per-task budgets that abort runaway runs, a daily budget that pauses the queue, live spend in the UI |
 | **Human oversight** | optional approval gate (nothing ships until you review the diff), mid-task steering, one-click PR revisions on the same branch |
-| **Chat** | ask an assistant about any past or running task — grounded in the actual records, traces, and memory |
+| **Chat** | ask an assistant about any past or running task — grounded in the actual records, traces, and memory; from the web UI or `/ask <question>` in Slack/Telegram |
 | **Observability** | every message, tool call, shell command, and token persisted in SQLite and streamed live over SSE |
 
 ## Supported models
