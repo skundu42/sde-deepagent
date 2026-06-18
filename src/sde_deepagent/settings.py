@@ -125,6 +125,12 @@ class Settings(BaseSettings):
         return self.data_dir / "control-git"
 
     @property
+    def ref_clones_dir(self) -> Path:
+        """Read-only reference clones for the chat assistant's code-reading tools.
+        Kept out of workspaces_dir so the task-workspace reaper never touches them."""
+        return self.data_dir / "ref-clones"
+
+    @property
     def sandbox_state_path(self) -> Path:
         """Last-use timestamps for sandbox containers (drives the idle reaper)."""
         return self.data_dir / "sandbox-usage.json"

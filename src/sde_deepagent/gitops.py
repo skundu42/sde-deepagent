@@ -185,6 +185,11 @@ JUNK_EXCLUDES = [
     # deepagents' summarization middleware offloads evicted history here (inside
     # the backend root = the repo clone); never let it leak into a commit/PR
     "conversation_history/",
+    # company-context docs are mounted read-only at _context/ for the agent to
+    # read. mount_company_context() excludes them in repo/.git, but the
+    # controller commits via the control-git copy snapshotted at clone time —
+    # before the mount — so the exclusion must be baked in here to reach it.
+    "_context/",
 ]
 
 

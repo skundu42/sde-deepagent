@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 import uuid
 from typing import Any
@@ -15,9 +16,11 @@ from langchain_core.messages import HumanMessage
 
 from .config import ConfigStore
 from .db import Database
+from .gitops import GitError, parse_remote
 from .llm import normalize_model_id
 from .memory import GLOBAL_TAG, Memory, memory_from_settings, repo_tag
 from .pricing import CostTracker
+from .repo_reader import RepoReader
 from .settings import Settings
 
 logger = logging.getLogger(__name__)
@@ -53,13 +56,22 @@ your tools:
   scope, and indexing status).
 - list_repos / get_repo — the registered codebases (description, branch, setup
   and test commands, context docs).
+- list_repo_files / grep_repo / read_repo_file — read the ACTUAL source of a
+  registered codebase OR any GitHub repo added on the Resources page. Use these to
+  answer code-level questions ("what does X do", "where is Y defined", "how is Z
+  implemented") from the real files instead of guessing or relying on the README.
+  Typical flow: grep_repo or list_repo_files to locate the file, then read_repo_file.
 - list_tasks / get_task / get_task_trace — task records and step-by-step traces.
 
-Ground every claim in tool results — never invent details. Cite sources: a
-resource's title or URL, or a task id like `69e1b9e5ca`. If search_knowledge
-finds nothing and list_resources shows a matching resource still `queued`, tell
-the user it is still being indexed rather than that it doesn't exist. Be concise;
-lead with the answer.
+When a question is about how code works, READ THE SOURCE with the repo tools —
+search_knowledge only has summaries, not the code. The `repo` argument is a
+registered codebase name or a GitHub URL/owner-repo shown by list_resources.
+
+Ground every claim in tool results — never invent details. Cite sources: a file
+path you read, a resource's title or URL, or a task id like `69e1b9e5ca`. If
+search_knowledge finds nothing and list_resources shows a matching resource still
+`queued`, tell the user it is still being indexed rather than that it doesn't
+exist. Be concise; lead with the answer.
 """
 
 
@@ -176,6 +188,86 @@ def make_chat_tools(db: Database, settings: Settings, cfg: ConfigStore,
 
     if memory is None:
         memory = memory_from_settings(settings)
+
+    # ---- code reading: clone + read the actual source of repos the operator
+    # registered (Codebases) or ingested (a GitHub URL on the Resources page) ----
+    reader = RepoReader(settings)
+
+    def _canon_key(url: str | None) -> str | None:
+        p = parse_remote(url or "")
+        return "/".join(p).lower() if p else None
+
+    async def _resolve_repo_url(identifier: str) -> str:
+        """Map a repo name / GitHub URL / owner-repo to a clone URL — but only for
+        repos the operator registered or ingested, so chat can't clone arbitrary
+        URLs. Raises ValueError with a user-facing message otherwise."""
+        ident = identifier.strip()
+        repos = cfg.repos()
+        if ident in repos:
+            return repos[ident].url
+        if re.fullmatch(r"[\w.-]+/[\w.-]+", ident):  # owner/repo shorthand
+            ident = f"https://github.com/{ident}"
+        key = _canon_key(ident)
+        if not key:
+            raise ValueError(
+                f"'{identifier}' is not a registered codebase or a GitHub repo URL")
+        allowed: dict[str, str] = {}
+        for r in repos.values():
+            if (k := _canon_key(r.url)):
+                allowed.setdefault(k, r.url)
+        if memory:
+            tags = [GLOBAL_TAG] + [repo_tag(n) for n in repos]
+            for d in await memory.list_documents(tags, limit=200):
+                url = (d.get("metadata") or {}).get("url")
+                if (k := _canon_key(url)):
+                    allowed.setdefault(k, url)
+        if key not in allowed:
+            raise ValueError(
+                f"repo '{identifier}' isn't available to read — register it under "
+                "Codebases or add its GitHub URL on the Resources page first")
+        return allowed[key]
+
+    @tool
+    async def list_repo_files(repo: str, subdir: str = "", limit: int = 300) -> str:
+        """List the source files in a codebase so you can choose which to read.
+        `repo` is a registered codebase name OR a GitHub repo URL/owner-repo that
+        appears in list_resources. Optional `subdir` narrows to a path prefix."""
+        try:
+            url = await _resolve_repo_url(repo)
+            files = await reader.list_files(url, subdir.strip(), min(limit, 1000))
+        except (ValueError, GitError) as e:
+            return f"Error: {e}"
+        if not files:
+            return "No files found" + (f" under {subdir!r}." if subdir else ".")
+        head = f"{len(files)} file(s)" + (f" under {subdir!r}" if subdir else "") + ":\n"
+        return head + "\n".join(files)
+
+    @tool
+    async def grep_repo(repo: str, pattern: str, limit: int = 80) -> str:
+        """Search a codebase's source for a string/regex (git grep) to locate where
+        something is defined or used before reading a file. `repo` is a registered
+        codebase name OR a GitHub repo URL/owner-repo from list_resources."""
+        try:
+            url = await _resolve_repo_url(repo)
+            lines = await reader.grep(url, pattern, min(limit, 300))
+        except (ValueError, GitError) as e:
+            return f"Error: {e}"
+        return "\n".join(lines) if lines else f"No matches for {pattern!r}."
+
+    @tool
+    async def read_repo_file(repo: str, path: str, max_bytes: int = 40000) -> str:
+        """Read one source file from a codebase to answer code-level questions from
+        the ACTUAL source. `repo` is a registered codebase name OR a GitHub repo
+        URL/owner-repo from list_resources; `path` is repo-relative."""
+        try:
+            url = await _resolve_repo_url(repo)
+            text = await reader.read_file(url, path.strip(),
+                                          min(max(max_bytes, 1000), 200_000))
+        except (ValueError, GitError) as e:
+            return f"Error: {e}"
+        return f"=== {path} ===\n{text}"
+
+    tools += [list_repo_files, grep_repo, read_repo_file]
     if memory:
         @tool
         async def search_knowledge(query: str) -> str:

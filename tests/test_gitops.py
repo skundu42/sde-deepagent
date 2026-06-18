@@ -12,6 +12,7 @@ from sde_deepagent.gitops import (
     branch_name_for,
     commit_all,
     commits_ahead,
+    control_git,
     create_pull_request,
     diff_stat,
     has_changes,
@@ -152,6 +153,34 @@ async def test_workspace_clone_and_commit(temp_env, tmp_path):
     await commit_all(ws, "add new.txt")
     assert not await has_changes(ws)
     assert await commits_ahead(ws) == 1
+
+
+async def test_company_context_is_not_committed(temp_env, tmp_path):
+    """Company-context docs are mounted into the workspace at _context/ for the
+    agent to read, but the controller commits via the trusted control-git dir
+    (a copy of .git snapshotted at clone time). Regression: the _context/
+    exclusion must reach that git dir so `git add -A` never sweeps company docs
+    into the agent's branch/PR."""
+    from sde_deepagent.context import mount_company_context
+
+    settings = get_settings()
+    settings.context_dir.mkdir(parents=True, exist_ok=True)
+    (settings.context_dir / "policy.md").write_text("# internal company policy\n")
+
+    origin = tmp_path / "origin"
+    await _make_origin(origin)
+    repo = RepoConfig(name="demo", url=str(origin), default_branch="main")
+    ws = await prepare_workspace("ctx1", "do it", repo, settings)
+
+    assert mount_company_context(ws.path, settings) == ["policy.md"]
+    assert (ws.path / "_context" / "policy.md").exists()  # mounted for the agent
+
+    (ws.path / "feature.py").write_text("x = 1\n")  # the agent's actual change
+    await commit_all(ws, "agent change")
+
+    committed = await control_git(ws, ["ls-tree", "-r", "--name-only", "HEAD"])
+    assert "feature.py" in committed                 # the real work is committed
+    assert "_context/" not in committed              # company docs never leak in
 
 
 async def test_prepare_workspace_reuse_preserves_edits_and_can_push(temp_env, tmp_path):

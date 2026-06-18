@@ -54,7 +54,8 @@ async def test_list_and_get_task_tools(stack):
 
     tools = make_chat_tools(db, settings, cfg)
     assert {t.name for t in tools} == {"list_tasks", "get_task", "get_task_trace",
-                                       "list_repos", "get_repo"}
+                                       "list_repos", "get_repo", "list_repo_files",
+                                       "grep_repo", "read_repo_file"}
 
     out = await _tool(tools, "list_tasks").ainvoke({})
     assert t1.id in out and "Fix login" in out and "$0.4200" in out
@@ -104,6 +105,41 @@ async def test_repo_tools(stack):
     assert "uv run pytest" in out and "main" in out and "docs/arch.md" in out
     out = await _tool(tools, "get_repo").ainvoke({"name": "ghost"})
     assert "No repo" in out
+
+
+async def _make_origin(path):
+    from sde_deepagent.gitops import run_cmd
+    path.mkdir(parents=True)
+    for args in (["git", "init", "-b", "main"],
+                 ["git", "config", "user.email", "t@t"],
+                 ["git", "config", "user.name", "t"]):
+        await run_cmd(args, cwd=path)
+    (path / "main.py").write_text("def hello():\n    return 'hi'\n")
+    await run_cmd(["git", "add", "-A"], cwd=path)
+    await run_cmd(["git", "commit", "-m", "init"], cwd=path)
+
+
+async def test_code_reading_tools_on_registered_repo(stack, tmp_path):
+    from sde_deepagent.config import RepoConfig
+    db, settings, cfg = stack
+    origin = tmp_path / "origin"
+    await _make_origin(origin)
+    cfg.upsert_repo(RepoConfig(name="backend", url=str(origin), default_branch="main"))
+    tools = make_chat_tools(db, settings, cfg)
+
+    out = await _tool(tools, "list_repo_files").ainvoke({"repo": "backend"})
+    assert "main.py" in out
+
+    out = await _tool(tools, "read_repo_file").ainvoke({"repo": "backend", "path": "main.py"})
+    assert "def hello" in out and "main.py" in out
+
+    out = await _tool(tools, "grep_repo").ainvoke({"repo": "backend", "pattern": "def hello"})
+    assert "main.py" in out
+
+    # security gate: a repo neither registered nor ingested cannot be cloned
+    out = await _tool(tools, "read_repo_file").ainvoke(
+        {"repo": "https://github.com/some/unlisted", "path": "README.md"})
+    assert "isn't available to read" in out
 
 
 def _fake_memory():

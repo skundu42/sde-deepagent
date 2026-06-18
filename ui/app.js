@@ -418,17 +418,23 @@ async function renderTaskDetail(id) {
 
   const timeline = $("#timeline");
   let lastId = 0;
+  // Follow the live tail only while the user is already parked near the bottom.
+  // Once they scroll up (e.g. to the top to read earlier trace), incoming events
+  // stop yanking the page back down.
+  const nearBottom = () =>
+    window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 120;
   const append = (ev, flash) => {
     if (ev.id <= lastId) return;
     lastId = ev.id;
     if (ev.kind === "todos") return renderTodos(ev.content.todos);
     const html = renderEvent(ev);
     if (!html) return;
+    const pinned = nearBottom();          // capture before the DOM grows
     timeline.insertAdjacentHTML("beforeend", html);
     if (flash) {
       const node = timeline.lastElementChild;
       node.classList.add("flash");
-      node.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      if (pinned) node.scrollIntoView({ block: "nearest", behavior: "smooth" });
     }
     if (ev.kind === "status") updateHead(ev.content);
   };
@@ -846,13 +852,60 @@ async function renderAgents() {
 
 const chatState = { sessionId: sessionStorage.getItem("chat_session") || null, msgs: [] };
 
+/* Minimal, safe Markdown → HTML for assistant replies. Escapes everything first
+   (so no model output can inject raw HTML), then applies a fixed subset:
+   headings, bold/italic, inline + fenced code, links, and ordered/unordered lists. */
+function mdToHtml(src) {
+  const lines = esc(src).replace(/\r\n/g, "\n").split("\n");
+  const inline = (s) => s
+    .replace(/`([^`]+)`/g, (_, c) => `<code>${c}</code>`)
+    .replace(/\*\*([\s\S]+?)\*\*/g, "<strong>$1</strong>")
+    .replace(/(^|[^*])\*([^*\n]+?)\*/g, "$1<em>$2</em>")
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
+             '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  const out = [];
+  let list = null, para = [];
+  const closeList = () => { if (list) { out.push(`</${list}>`); list = null; } };
+  const flushPara = () => { if (para.length) { out.push(`<p>${para.join("<br>")}</p>`); para = []; } };
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (/^```/.test(line)) {                       // fenced code block
+      flushPara(); closeList();
+      const buf = [];
+      for (i++; i < lines.length && !/^```/.test(lines[i]); i++) buf.push(lines[i]);
+      out.push(`<pre><code>${buf.join("\n")}</code></pre>`);
+      continue;
+    }
+    let m;
+    if ((m = line.match(/^(#{1,6})\s+(.*)$/))) {    // heading
+      flushPara(); closeList();
+      const lvl = Math.min(m[1].length + 2, 6);
+      out.push(`<h${lvl}>${inline(m[2])}</h${lvl}>`);
+    } else if ((m = line.match(/^\s*[-*+]\s+(.*)$/))) {  // unordered list
+      flushPara();
+      if (list !== "ul") { closeList(); out.push("<ul>"); list = "ul"; }
+      out.push(`<li>${inline(m[1])}</li>`);
+    } else if ((m = line.match(/^\s*\d+[.)]\s+(.*)$/))) { // ordered list
+      flushPara();
+      if (list !== "ol") { closeList(); out.push("<ol>"); list = "ol"; }
+      out.push(`<li>${inline(m[1])}</li>`);
+    } else if (!line.trim()) {                       // blank line → break
+      flushPara(); closeList();
+    } else {                                         // paragraph text
+      closeList(); para.push(inline(line));
+    }
+  }
+  flushPara(); closeList();
+  return out.join("\n");
+}
+
 function renderChatMsgs() {
   const thread = $("#chat-thread");
   if (!thread) return;
   thread.innerHTML = chatState.msgs.map((m) => `
     <div class="chat-msg ${m.role}">
       <span class="chat-who">${m.role === "user" ? "&gt; you" : "▚▞ sde-deepagent"}${m.cost ? ` <i class="chat-cost">$${m.cost.toFixed(4)}</i>` : ""}</span>
-      <div class="chat-text">${esc(m.text)}</div>
+      <div class="chat-text${m.role === "user" ? "" : " md"}">${m.role === "user" ? esc(m.text) : mdToHtml(m.text)}</div>
     </div>`).join("") +
     (chatState.waiting ? `<div class="chat-msg assistant"><span class="chat-who">▚▞ sde-deepagent</span>
       <div class="chat-text thinking">consulting task history<span class="cursor">█</span></div></div>` : "");
@@ -1040,8 +1093,20 @@ async function renderStatus() {
   statusTimer = setTimeout(() => { if (location.hash === "#/status") renderStatus(); }, 10000);
 }
 
+/* ---------- scroll-to-top ---------- */
+
+function setupScrollTop() {
+  const btn = $("#scroll-top");
+  if (!btn) return;
+  const toggle = () => btn.classList.toggle("show", window.scrollY > 400);
+  window.addEventListener("scroll", toggle, { passive: true });
+  btn.onclick = () => window.scrollTo({ top: 0, behavior: "smooth" });
+  toggle();
+}
+
 /* ---------- boot ---------- */
 
+setupScrollTop();
 connectGlobal();
 refreshStats();
 refreshHealth();
