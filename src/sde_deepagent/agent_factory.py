@@ -338,6 +338,51 @@ async def build_agent(
     return BuiltAgent(agent=agent, workspace=ws, result=result)
 
 
+# Placeholders the orchestrator system prompt is .format()-ed with at task time
+# (see the .format(...) call in build_agent). A custom orchestrator override may
+# only reference these; anything else — or an unescaped literal brace — raises
+# at agent-build time, so we reject it up front. Keep in sync with that call.
+ORCHESTRATOR_FORMAT_KEYS = frozenset({
+    "exec_environment", "branch", "repo_name", "repo_description", "default_branch",
+    "setup_cmd", "test_cmd", "task_description", "ship_instructions", "repo_map",
+    "context_block",
+})
+
+
+def validate_orchestrator_prompt(text: str) -> str | None:
+    """Return an error message if an orchestrator prompt override would fail
+    str.format() at task time (unknown placeholder or unescaped brace), else None.
+    Subagent prompts are used verbatim and need no such check."""
+    try:
+        text.format(**{k: "" for k in ORCHESTRATOR_FORMAT_KEYS})
+    except KeyError as e:
+        allowed = ", ".join("{%s}" % k for k in sorted(ORCHESTRATOR_FORMAT_KEYS))
+        return f"orchestrator prompt uses unknown placeholder {e}; allowed: {allowed}"
+    except (ValueError, IndexError) as e:
+        return f"orchestrator prompt has invalid format ({e}); escape literal braces as {{{{ }}}}"
+    return None
+
+
+def validate_agents_payload(body: dict) -> list[str]:
+    """Validate a raw agents-config payload (the dict the UI PUTs) before it is
+    written: orchestrator prompt placeholders and mcp_servers shape."""
+    errors = []
+    orch = body.get("orchestrator") or {}
+    if isinstance(orch, dict) and orch.get("system_prompt"):
+        err = validate_orchestrator_prompt(orch["system_prompt"])
+        if err:
+            errors.append(err)
+    mcp = body.get("mcp_servers")
+    if mcp is not None:
+        if not isinstance(mcp, dict):
+            errors.append("mcp_servers must be a mapping of name -> config object")
+        else:
+            for name, spec in mcp.items():
+                if not isinstance(spec, dict):
+                    errors.append(f"mcp server '{name}' must be a config object")
+    return errors
+
+
 def validate_models(agents_cfg: AgentsConfig) -> list[str]:
     """Return a list of config errors (bad model ids / effort levels) without
     instantiating models."""

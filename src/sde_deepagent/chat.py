@@ -16,7 +16,7 @@ from langchain_core.messages import HumanMessage
 from .config import ConfigStore
 from .db import Database
 from .llm import normalize_model_id
-from .memory import GLOBAL_TAG, memory_from_settings, repo_tag
+from .memory import GLOBAL_TAG, Memory, memory_from_settings, repo_tag
 from .pricing import CostTracker
 from .settings import Settings
 
@@ -44,14 +44,22 @@ tasks come in from the UI/Telegram/Slack/Linear, an orchestrator agent (with
 explorer/coder/tester/reviewer subagents) implements them on a cloned codebase,
 runs tests, and opens a PR.
 
-Answer the operator's questions about tasks using your tools:
-- list_tasks to find tasks (filter by status if asked)
-- get_task for one task's full record (description, branch, PR, cost, error)
-- get_task_trace for what the agent actually did step by step
-- search_memory for learnings the agents recorded about codebases
+Answer the operator's questions grounded in everything the system knows, using
+your tools:
+- search_knowledge — answer content questions from ingested resources (websites,
+  docs and pasted text added on the Resources page) AND the learnings the agents
+  recorded about codebases. Use this whenever asked what a resource or doc says.
+- list_resources — see what resources have been ingested (title, source URL,
+  scope, and indexing status).
+- list_repos / get_repo — the registered codebases (description, branch, setup
+  and test commands, context docs).
+- list_tasks / get_task / get_task_trace — task records and step-by-step traces.
 
-Ground every claim in tool results — never invent task details. Cite task ids
-like `69e1b9e5ca`. Be concise; lead with the answer.
+Ground every claim in tool results — never invent details. Cite sources: a
+resource's title or URL, or a task id like `69e1b9e5ca`. If search_knowledge
+finds nothing and list_resources shows a matching resource still `queued`, tell
+the user it is still being indexed rather than that it doesn't exist. Be concise;
+lead with the answer.
 """
 
 
@@ -66,7 +74,8 @@ def _ago(ts: float | None) -> str:
     return f"{int(s / 86400)}d ago"
 
 
-def make_chat_tools(db: Database, settings: Settings, cfg: ConfigStore) -> list:
+def make_chat_tools(db: Database, settings: Settings, cfg: ConfigStore,
+                    memory: Memory | None = None) -> list:
     from langchain_core.tools import tool
 
     @tool
@@ -136,21 +145,73 @@ def make_chat_tools(db: Database, settings: Settings, cfg: ConfigStore) -> list:
             lines.append(line)
         return "\n".join(lines)
 
-    tools = [list_tasks, get_task, get_task_trace]
+    @tool
+    async def list_repos() -> str:
+        """List the registered codebases the agents work on, with the
+        description used for task routing and the default branch."""
+        repos = cfg.repos()
+        if not repos:
+            return "No codebases registered."
+        lines = []
+        for name, r in repos.items():
+            desc = (r.description or "").strip() or "(no description)"
+            lines.append(f"{name} [{r.default_branch}] — {desc}")
+        return "\n".join(lines)
 
-    memory = memory_from_settings(settings)
+    @tool
+    async def get_repo(name: str) -> str:
+        """Full config of one registered codebase: url, default branch, setup
+        and test commands, and the context docs the agents are given."""
+        r = cfg.repos().get(name.strip())
+        if not r:
+            return f"No repo named {name!r}. Use list_repos to see registered codebases."
+        return "\n".join([
+            f"name: {r.name}", f"url: {r.url}", f"default_branch: {r.default_branch}",
+            f"description: {(r.description or '').strip() or '(none)'}",
+            f"setup: {r.setup or '(none)'}", f"test: {r.test or '(none)'}",
+            f"context: {', '.join(r.context) or '(none)'}",
+        ])
+
+    tools = [list_tasks, get_task, get_task_trace, list_repos, get_repo]
+
+    if memory is None:
+        memory = memory_from_settings(settings)
     if memory:
         @tool
-        async def search_memory(query: str) -> str:
-            """Search the agents' long-term memory: conventions, gotchas and
-            learnings recorded about the registered codebases."""
+        async def search_knowledge(query: str) -> str:
+            """Search ingested knowledge to answer content questions: resources
+            added on the Resources page (websites, docs, pasted text) AND the
+            conventions, gotchas and learnings the agents recorded about the
+            codebases. Use this whenever asked what a resource or doc says."""
             tags = [GLOBAL_TAG] + [repo_tag(name) for name in cfg.repos()]
-            results = await memory.search(query, tags, limit=6)
+            results = await memory.search(query, tags, limit=8)
             if not results:
-                return "No relevant memories found."
+                return ("No matching knowledge found. If a resource was just added it "
+                        "may still be indexing — check list_resources for its status.")
             return "\n".join(f"- [{r['container']}] {r['memory']}" for r in results)
 
-        tools.append(search_memory)
+        @tool
+        async def list_resources(scope: str = "") -> str:
+            """List resources ingested on the Resources page (websites, docs,
+            pasted text). Optional `scope`: a repo name or 'global'. Shows each
+            resource's title, kind, scope, indexing status, and source URL."""
+            tags = [GLOBAL_TAG] + [repo_tag(name) for name in cfg.repos()]
+            docs = await memory.list_documents(tags, limit=200)
+            rows = []
+            for d in docs:
+                meta = d.get("metadata") or {}
+                if meta.get("source") != "resource":
+                    continue  # agent learnings / task outcomes belong to search_knowledge
+                sc = meta.get("scope", "global")
+                if scope and sc != scope:
+                    continue
+                title = d.get("title") or meta.get("title") or meta.get("url") or d.get("id")
+                url = meta.get("url")
+                rows.append(f"- [{d.get('status') or '?'}] {title} "
+                            f"({meta.get('kind', 'text')}, {sc})" + (f" {url}" if url else ""))
+            return "\n".join(rows) if rows else "No resources ingested yet."
+
+        tools += [search_knowledge, list_resources]
     return tools
 
 

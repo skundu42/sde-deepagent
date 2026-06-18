@@ -124,6 +124,275 @@ async def test_linear_ingest_dedups_same_issue(temp_env):
         await db.close()
 
 
+async def test_linear_assignee_mode_resolves_viewer_and_filters(temp_env, monkeypatch):
+    # in assignee mode the poll resolves the key's own user id once (cached) and
+    # queries for issues assigned to it, not by label
+    import json
+
+    import httpx
+
+    from sde_deepagent.intake.linear import ASSIGNED_QUERY, LinearIntake
+
+    monkeypatch.setenv("LINEAR_TRIGGER", "assignee")
+    monkeypatch.setenv("LINEAR_API_KEY", "lin_test")
+    settings = get_settings()
+    intake = LinearIntake(settings, db=None)
+    assert intake._by_assignee is True
+
+    viewer_calls = []
+
+    def handler(req):
+        q = json.loads(req.content)["query"]
+        if "viewer" in q:
+            viewer_calls.append(q)
+            return httpx.Response(200, json={"data": {"viewer": {"id": "usr_agent",
+                                                                 "name": "Agent"}}})
+        return httpx.Response(200, json={"data": {"issues": {"nodes": []}}})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        query, variables = await intake._poll_query(client)
+        assert query == ASSIGNED_QUERY
+        assert variables == {"uid": "usr_agent"}
+        await intake._poll_query(client)              # second poll reuses the id
+        assert len(viewer_calls) == 1                 # viewer resolved only once
+    finally:
+        await client.aclose()
+
+
+def test_linear_webhook_assignee_matches_only_agents_issues(temp_env, monkeypatch):
+    from sde_deepagent.intake.linear import LinearIntake
+
+    monkeypatch.setenv("LINEAR_TRIGGER", "assignee")
+    settings = get_settings()
+    intake = LinearIntake(settings, db=None)
+    intake._my_user_id = "usr_agent"  # pretend the viewer id is already resolved
+
+    mine = {"type": "Issue", "data": {"id": "iss_9", "identifier": "ABC-9",
+            "title": "do it", "url": "u", "assigneeId": "usr_agent"}}
+    theirs = {"type": "Issue", "data": {"id": "iss_10", "identifier": "ABC-10",
+              "title": "not mine", "url": "u", "assigneeId": "usr_other"}}
+    assert intake._webhook_issue(mine)["identifier"] == "ABC-9"
+    assert intake._webhook_issue(theirs) is None      # assigned to someone else
+
+
+def test_linear_webhook_label_mode_unchanged(temp_env, monkeypatch):
+    # default (label) mode keeps its original behavior
+    from sde_deepagent.intake.linear import LinearIntake
+
+    monkeypatch.setenv("LINEAR_LABEL", "agent")
+    settings = get_settings()
+    intake = LinearIntake(settings, db=None)
+    assert intake._by_assignee is False
+
+    labelled = {"type": "Issue", "data": {"id": "iss_1", "identifier": "ABC-1",
+                "title": "t", "url": "u", "labels": [{"name": "agent"}]}}
+    other = {"type": "Issue", "data": {"id": "iss_2", "identifier": "ABC-2",
+             "title": "t", "url": "u", "labels": [{"name": "bug"}]}}
+    assert intake._webhook_issue(labelled)["identifier"] == "ABC-1"
+    assert intake._webhook_issue(other) is None       # missing the agent label
+
+
+def test_linear_write_headers_prefers_oauth_token(temp_env):
+    from sde_deepagent.intake.linear import LinearIntake
+    from sde_deepagent.settings import Settings
+    intake = LinearIntake(Settings(linear_oauth_token="oauth_tok",
+                                   linear_api_key="lin_key"), db=None)
+    assert intake._write_headers()["Authorization"] == "Bearer oauth_tok"  # app token wins
+
+
+def test_linear_write_headers_falls_back_to_api_key(temp_env):
+    from sde_deepagent.intake.linear import LinearIntake
+    from sde_deepagent.settings import Settings
+    intake = LinearIntake(Settings(linear_api_key="lin_key"), db=None)
+    assert intake._write_headers()["Authorization"] == "lin_key"  # personal key, no Bearer
+
+
+def test_linear_write_headers_none_without_credential(temp_env):
+    from sde_deepagent.intake.linear import LinearIntake
+    from sde_deepagent.settings import Settings
+    intake = LinearIntake(Settings(linear_webhook_secret="whsec"), db=None)
+    assert intake._write_headers() is None  # webhook-only, no write-back credential
+
+
+def test_linear_polling_disabled_without_api_key(temp_env):
+    from sde_deepagent.intake.linear import LinearIntake
+    from sde_deepagent.settings import Settings
+    webhook_only = LinearIntake(Settings(linear_webhook_secret="whsec",
+                                         linear_oauth_token="oauth_tok"), db=None)
+    assert webhook_only._polling is False
+    with_key = LinearIntake(Settings(linear_api_key="lin_key"), db=None)
+    assert with_key._polling is True
+
+
+async def test_linear_comment_posts_with_app_token(temp_env):
+    import json
+
+    import httpx
+
+    from sde_deepagent.intake.linear import LinearIntake
+    from sde_deepagent.settings import Settings
+    intake = LinearIntake(Settings(linear_oauth_token="oauth_tok"), db=None)
+    captured: dict = {}
+
+    def handler(req):
+        captured["auth"] = req.headers.get("authorization")
+        captured["body"] = json.loads(req.content)
+        return httpx.Response(200, json={"data": {"commentCreate": {"success": True}}})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        await intake._comment(client, "iss_1", "hello")
+    finally:
+        await client.aclose()
+    assert captured["auth"] == "Bearer oauth_tok"          # posted as the app
+    assert captured["body"]["variables"]["issueId"] == "iss_1"
+
+
+async def test_linear_comment_skipped_without_credential(temp_env):
+    import httpx
+
+    from sde_deepagent.intake.linear import LinearIntake
+    from sde_deepagent.settings import Settings
+    intake = LinearIntake(Settings(linear_webhook_secret="whsec"), db=None)
+    calls = {"n": 0}
+
+    def handler(req):
+        calls["n"] += 1
+        return httpx.Response(200, json={})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        await intake._comment(client, "iss_1", "hello")  # no credential → no HTTP call
+    finally:
+        await client.aclose()
+    assert calls["n"] == 0
+
+
+def test_linear_agent_session_parse(temp_env):
+    from sde_deepagent.intake.linear import LinearIntake
+    from sde_deepagent.settings import Settings
+    intake = LinearIntake(Settings(linear_oauth_token="tok"), db=None)
+    created = {"type": "AgentSessionEvent", "action": "created",
+              "agentSession": {"id": "sess_1", "issue": {
+                  "id": "iss_1", "identifier": "ABC-1", "title": "do it",
+                  "description": "d", "url": "https://linear.app/x/ABC-1"}}}
+    sid, issue = intake._agent_session_issue(created)
+    assert sid == "sess_1" and issue["identifier"] == "ABC-1" and issue["id"] == "iss_1"
+    # only the 'created' action starts a task; follow-up prompts are ignored here
+    assert intake._agent_session_issue({**created, "action": "prompted"}) is None
+    # a session without an issue (e.g. a bare mention) is skipped
+    assert intake._agent_session_issue(
+        {"type": "AgentSessionEvent", "action": "created", "agentSession": {"id": "s"}}) is None
+
+
+async def test_linear_agent_activity_posts_with_app_token(temp_env):
+    import json
+
+    import httpx
+
+    from sde_deepagent.intake.linear import LinearIntake
+    from sde_deepagent.settings import Settings
+    intake = LinearIntake(Settings(linear_oauth_token="tok"), db=None)
+    captured: dict = {}
+
+    def handler(req):
+        captured["auth"] = req.headers.get("authorization")
+        captured["body"] = json.loads(req.content)
+        return httpx.Response(200, json={"data": {"agentActivityCreate": {"success": True}}})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        await intake._agent_activity(client, "sess_1", "response", "PR is ready")
+    finally:
+        await client.aclose()
+    assert captured["auth"] == "Bearer tok"
+    inp = captured["body"]["variables"]["input"]
+    assert inp["agentSessionId"] == "sess_1"
+    assert inp["content"] == {"type": "response", "body": "PR is ready"}
+
+
+async def test_linear_agent_session_ingest_acks_and_dedups(temp_env):
+    import json
+
+    import httpx
+
+    from sde_deepagent.db import Database
+    from sde_deepagent.intake.linear import LinearIntake
+    from sde_deepagent.settings import Settings
+    settings = Settings(linear_oauth_token="tok")
+    db = Database(settings.db_path)
+    await db.connect()
+    intake = LinearIntake(settings, db)
+    acts: list[str] = []
+
+    def handler(req):
+        acts.append(json.loads(req.content)["variables"]["input"]["content"]["type"])
+        return httpx.Response(200, json={"data": {"agentActivityCreate": {"success": True}}})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    payload = {"type": "AgentSessionEvent", "action": "created",
+               "agentSession": {"id": "sess_1", "issue": {
+                   "id": "iss_1", "identifier": "ABC-1", "title": "t", "url": "u"}}}
+    try:
+        await intake._handle_agent_session(client, payload)
+        await intake._handle_agent_session(client, payload)  # same session → one task
+        tasks = [t for t in await db.list_tasks() if t.source == "linear"]
+    finally:
+        await client.aclose()
+        await db.close()
+    assert len(tasks) == 1
+    assert tasks[0].source_ref.get("agent_session_id") == "sess_1"
+    assert acts == ["thought"]  # acked once; the dedup'd second event posts nothing
+
+
+async def test_linear_notify_posts_response_activity_for_agent_session(temp_env):
+    import json
+
+    import httpx
+
+    from sde_deepagent.db import Database
+    from sde_deepagent.intake.linear import LinearIntake
+    from sde_deepagent.settings import Settings
+    settings = Settings(linear_oauth_token="tok")
+    db = Database(settings.db_path)
+    await db.connect()
+    intake = LinearIntake(settings, db)
+    t = await db.create_task_if_new(
+        title="ABC-1: t", description="d", source="linear",
+        source_ref={"issue_id": "iss_1", "agent_session_id": "sess_1"},
+        dedup_key="linear:agent:sess_1")
+    await db.update_task(t.id, status="completed", pr_url="https://github.com/x/y/pull/1")
+    t = await db.get_task(t.id)
+    captured: dict = {}
+
+    def handler(req):
+        captured["body"] = json.loads(req.content)
+        return httpx.Response(200, json={"data": {"agentActivityCreate": {"success": True}}})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        await intake.notify(t, client=client)
+    finally:
+        await client.aclose()
+        await db.close()
+    inp = captured["body"]["variables"]["input"]
+    assert inp["agentSessionId"] == "sess_1"
+    assert inp["content"]["type"] == "response"   # completed → response (error if failed)
+
+
+async def test_linear_enabled_by_webhook_secret_without_api_key(temp_env, monkeypatch):
+    import httpx
+
+    from sde_deepagent.server import create_app
+    monkeypatch.setenv("LINEAR_WEBHOOK_SECRET", "whsec")
+    monkeypatch.setenv("LINEAR_OAUTH_TOKEN", "oauth_tok")
+    app = create_app()
+    async with httpx.ASGITransport(app=app):
+        async with app.router.lifespan_context(app):
+            assert app.state.linear is not None  # Linear enabled with no personal key
+
+
 def test_parse_plain():
     repo, title, desc = parse_task_text("Fix the login bug")
     assert repo is None

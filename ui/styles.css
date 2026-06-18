@@ -118,6 +118,27 @@ a:hover { text-decoration: underline; }
 
 /* ---------- task list ---------- */
 
+.filter-pills { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+.filter-pill {
+  font-family: var(--mono); font-size: 11px; letter-spacing: .3px;
+  padding: 4px 11px; border-radius: 999px; cursor: pointer;
+  color: var(--ink-dim); background: transparent;
+  border: 1px solid var(--line);
+  display: inline-flex; align-items: center; gap: 6px;
+  transition: color .12s ease, border-color .12s ease, background .12s ease;
+}
+.filter-pill:hover { color: var(--ink); border-color: var(--line-bright); }
+.filter-pill.on {
+  color: var(--status-color); border-color: var(--status-color); background: var(--bg-raise);
+}
+.filter-pill.zero { opacity: .4; }
+.filter-pill .fp-count {
+  font-size: 10px; color: var(--ink-faint);
+  background: var(--line); border-radius: 999px;
+  padding: 0 5px; min-width: 13px; text-align: center;
+}
+.filter-pill.on .fp-count { color: var(--status-color); }
+
 .task-rows { display: flex; flex-direction: column; gap: 8px; }
 .task-row {
   display: grid; grid-template-columns: 92px 1fr auto; gap: 8px 16px; align-items: center;
@@ -296,6 +317,68 @@ select optgroup { color: var(--ink-faint); font-style: normal; }
 
 .model-hints { color: var(--ink-faint); font-size: 11px; margin: 14px 0 18px; }
 .model-hints code { color: var(--ink-dim); background: #050807; padding: 1px 6px; border: 1px solid var(--line); }
+
+/* per-role system prompt editor */
+.agent-card .prompt-block { grid-column: 1 / -1; }
+.prompt-block details summary {
+  cursor: pointer; user-select: none; font-size: 11px; color: var(--ink-dim);
+  text-transform: uppercase; letter-spacing: .8px; padding: 4px 0;
+}
+.prompt-block details summary:hover { color: var(--ink); }
+.prompt-block .ovr {
+  color: var(--amber); border: 1px solid rgba(255,179,71,.45); background: var(--amber-soft);
+  border-radius: 999px; padding: 0 7px; font-size: 10px; text-transform: lowercase; letter-spacing: 0;
+}
+.prompt-block .hint { font-size: 11px; color: var(--ink-faint); margin: 6px 0; }
+.prompt-block .hint code { color: var(--ink-dim); background: #050807; padding: 0 4px; border: 1px solid var(--line); }
+.prompt-ta {
+  width: 100%; margin: 8px 0; background: #050807; color: var(--ink);
+  border: 1px solid var(--line-bright); font: 12px var(--mono); padding: 9px 11px;
+  outline: none; border-radius: 0; resize: vertical; min-height: 120px; line-height: 1.5;
+}
+.prompt-ta:focus { border-color: var(--green); }
+
+/* MCP servers editor */
+.mcp-section { border: 1px solid var(--line); background: var(--bg-panel); padding: 16px 18px; margin: 16px 0 10px; }
+.mcp-section .role { font-family: var(--disp); font-weight: 700; letter-spacing: 1px; text-transform: uppercase; font-size: 13px; margin-bottom: 12px; }
+.mcp-section .role small { color: var(--ink-faint); font-size: 10px; letter-spacing: .5px; margin-left: 8px; text-transform: none; font-weight: 400; }
+.mcp-item { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 7px 0; border-bottom: 1px solid var(--line); }
+.mcp-item:last-child { border-bottom: 0; }
+.mcp-add { margin-top: 12px; display: flex; flex-direction: column; gap: 8px; max-width: 560px; }
+.mcp-add-row { display: flex; gap: 8px; }
+.mcp-add input, .mcp-add select, .mcp-add textarea {
+  background: #050807; color: var(--ink); border: 1px solid var(--line-bright);
+  font: 12px var(--mono); padding: 7px 10px; outline: none; border-radius: 0; width: 100%; resize: vertical;
+}
+.mcp-add input:focus, .mcp-add select:focus, .mcp-add textarea:focus { border-color: var(--cyan); }
+.mcp-add-row #mcp-transport { width: 150px; flex: none; }
+
+/* ---------- status ---------- */
+
+.status-list { display: flex; flex-direction: column; gap: 2px; }
+.status-row {
+  display: grid; grid-template-columns: 14px 200px 64px 1fr; align-items: center;
+  gap: 12px; padding: 11px 14px; border: 1px solid var(--line);
+  background: var(--bg-panel); border-left: 3px solid var(--dot);
+}
+.status-dot {
+  width: 9px; height: 9px; border-radius: 50%; background: var(--dot);
+  box-shadow: 0 0 7px var(--dot);
+}
+.status-row .status-label { font-weight: 600; color: var(--ink); font-size: 13px; }
+.status-state {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 1px;
+  text-align: center; padding: 2px 0; border-radius: 3px; color: var(--dot);
+}
+.status-state.ok { color: var(--green); }
+.status-state.warn { color: var(--amber); }
+.status-state.down { color: var(--red); }
+.status-state.off, .status-state.unconfigured { color: var(--ink-faint); }
+.status-detail { color: var(--ink-dim); font-size: 12px; }
+@media (max-width: 720px) {
+  .status-row { grid-template-columns: 14px 1fr auto; }
+  .status-detail { grid-column: 2 / -1; }
+}
 
 /* ---------- chat ---------- */
 

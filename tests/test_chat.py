@@ -53,7 +53,8 @@ async def test_list_and_get_task_tools(stack):
     await db.create_task("Add dark mode", "css work", repo="web")
 
     tools = make_chat_tools(db, settings, cfg)
-    assert {t.name for t in tools} == {"list_tasks", "get_task", "get_task_trace"}
+    assert {t.name for t in tools} == {"list_tasks", "get_task", "get_task_trace",
+                                       "list_repos", "get_repo"}
 
     out = await _tool(tools, "list_tasks").ainvoke({})
     assert t1.id in out and "Fix login" in out and "$0.4200" in out
@@ -79,12 +80,69 @@ async def test_trace_tool(stack):
     assert "STATUS completed" in out
 
 
-async def test_memory_tool_included_when_configured(stack, monkeypatch):
+async def test_memory_tools_included_when_configured(stack, monkeypatch):
     db, settings, cfg = stack
     monkeypatch.setattr(settings, "supermemory_base_url", "http://localhost:6767")
     monkeypatch.setattr(settings, "supermemory_api_key", "sm_x")
     tools = make_chat_tools(db, settings, cfg)
-    assert "search_memory" in {t.name for t in tools}
+    assert {"search_knowledge", "list_resources"} <= {t.name for t in tools}
+
+
+async def test_repo_tools(stack):
+    from sde_deepagent.config import RepoConfig
+    db, settings, cfg = stack
+    cfg.upsert_repo(RepoConfig(
+        name="backend", url="git@github.com:acme/backend.git",
+        description="FastAPI monolith serving the public API", default_branch="main",
+        test="uv run pytest -x -q", context=["docs/arch.md"]))
+    tools = make_chat_tools(db, settings, cfg)
+
+    out = await _tool(tools, "list_repos").ainvoke({})
+    assert "backend" in out and "FastAPI monolith" in out
+
+    out = await _tool(tools, "get_repo").ainvoke({"name": "backend"})
+    assert "uv run pytest" in out and "main" in out and "docs/arch.md" in out
+    out = await _tool(tools, "get_repo").ainvoke({"name": "ghost"})
+    assert "No repo" in out
+
+
+def _fake_memory():
+    from sde_deepagent.memory import Memory
+
+    def handler(request):
+        path = request.url.path
+        if path == "/v3/documents/list":
+            return httpx.Response(200, json={"memories": [
+                {"id": "d1", "title": "Welcome to Circles", "status": "done",
+                 "summary": "Circles is a currency framework",
+                 "metadata": {"source": "resource", "kind": "url", "scope": "global",
+                              "url": "https://docs.aboutcircles.com/"}},
+                {"id": "d2", "title": "still indexing", "status": "queued",
+                 "metadata": {"source": "resource", "kind": "text", "scope": "global"}},
+                {"id": "d3", "title": "an agent learning", "status": "done",
+                 "metadata": {"source": "learning"}},  # not a resource → filtered out
+            ]})
+        if path == "/v4/search":
+            return httpx.Response(200, json={"results": [
+                {"memory": "Circles uses an invitation system (96 CRC).", "similarity": 0.9}]})
+        return httpx.Response(404)
+
+    return Memory("http://sm:6767", "k", transport=httpx.MockTransport(handler))
+
+
+async def test_knowledge_and_resource_tools(stack):
+    db, settings, cfg = stack
+    tools = make_chat_tools(db, settings, cfg, memory=_fake_memory())
+    assert {"search_knowledge", "list_resources"} <= {t.name for t in tools}
+
+    out = await _tool(tools, "list_resources").ainvoke({})
+    assert "Welcome to Circles" in out
+    assert "https://docs.aboutcircles.com/" in out
+    assert "an agent learning" not in out          # non-resource docs excluded
+    assert "queued" in out                          # freshness: indexing status surfaced
+
+    out = await _tool(tools, "search_knowledge").ainvoke({"query": "invitation"})
+    assert "invitation system" in out
 
 
 async def test_chat_endpoint(temp_env, monkeypatch):

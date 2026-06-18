@@ -51,8 +51,17 @@ class Settings(BaseSettings):
             return "https://api.firecrawl.dev"
         return None
 
+    # Seatless setup: set linear_webhook_secret (inbound, no seat) + optionally
+    # linear_oauth_token (an OAuth app token, actor=app) to post comments as the
+    # app/bot without occupying a seat. linear_api_key is the legacy path: a
+    # personal key (a seat) that also enables polling.
     linear_api_key: str | None = None
-    linear_label: str = "agent"  # issues with this label get picked up
+    linear_oauth_token: str | None = None  # OAuth app token (actor=app); seatless write-back
+    # "label": pick up issues carrying linear_label. "assignee": pick up issues
+    # assigned to the api key's own user (use a key from a dedicated agent member).
+    # assignee mode requires linear_api_key; webhook-only falls back to label.
+    linear_trigger: str = "label"
+    linear_label: str = "agent"  # issues with this label get picked up (trigger=label)
     linear_poll_seconds: int = 30
     linear_webhook_secret: str | None = None
 

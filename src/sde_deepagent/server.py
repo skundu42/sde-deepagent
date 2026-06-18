@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
 from . import __version__
-from .agent_factory import validate_models
+from .agent_factory import validate_agents_payload, validate_models
 from .bus import EventBus
 from .chat import ChatService
 from .checkpointing import open_checkpointing
@@ -137,10 +137,12 @@ async def lifespan(app: FastAPI):
     if settings.slack_bot_token and settings.slack_app_token:
         intakes.append(SlackIntake(settings, db, chat=chat))
     linear: LinearIntake | None = None
-    if settings.linear_api_key:
+    # Enable Linear when there's any way to receive issues: a personal key
+    # (polling, a seat) or a webhook secret (seatless, inbound webhooks).
+    if settings.linear_api_key or settings.linear_webhook_secret:
         linear = LinearIntake(settings, db)
         intakes.append(linear)
-        if not settings.linear_webhook_secret:
+        if settings.linear_api_key and not settings.linear_webhook_secret:
             logger.info("linear: polling enabled; the /webhooks/linear endpoint "
                         "stays disabled (403) until LINEAR_WEBHOOK_SECRET is set")
 
@@ -222,6 +224,103 @@ def create_app() -> FastAPI:
                         for i in request.app.state.intakes],
             "running": len(request.app.state.worker.running),
         }
+
+    @app.get("/api/status")
+    async def status(request: Request):
+        """Per-component health for the Status page. Cheaply probes reachability
+        for the components that can fail silently (memory, Docker, GitHub,
+        Firecrawl); reports configured/derived state for the rest."""
+        import httpx
+
+        from . import sandbox
+
+        s = request.app.state.settings
+        memory = request.app.state.memory
+
+        def comp(key, label, state, detail):
+            return {"key": key, "label": label, "state": state, "detail": detail}
+
+        async def probe_memory():
+            if not memory:
+                return comp("memory", "Long-term memory", "unconfigured",
+                            "SUPERMEMORY_BASE_URL / SUPERMEMORY_API_KEY not set (optional)")
+            h = await memory.health()
+            state = {"ok": "ok", "unauthorized": "warn",
+                     "unreachable": "down", "error": "down"}[h["state"]]
+            return comp("memory", "Long-term memory", state, h["detail"])
+
+        async def probe_sandbox():
+            if not s.sandbox_default:
+                return comp("sandbox", "Sandbox (Docker)", "off",
+                            "sandbox disabled — task shells run on the host")
+            ok = await asyncio.to_thread(sandbox.docker_available)
+            return comp("sandbox", "Sandbox (Docker)", "ok" if ok else "down",
+                        "Docker daemon reachable" if ok
+                        else "Docker not running — tasks will fail at the sandbox step")
+
+        async def probe_github():
+            if not s.github_token:
+                return comp("github", "GitHub (PRs)", "unconfigured", "GITHUB_TOKEN not set")
+            try:
+                async with httpx.AsyncClient(timeout=8) as c:
+                    r = await c.get(f"{s.github_api_url.rstrip('/')}/rate_limit",
+                                    headers={"Authorization": f"Bearer {s.github_token}",
+                                             "Accept": "application/vnd.github+json"})
+                if r.status_code == 200:
+                    core = r.json().get("resources", {}).get("core", {})
+                    return comp("github", "GitHub (PRs)", "ok",
+                                f"token valid (rate {core.get('remaining', '?')}/{core.get('limit', '?')})")
+                if r.status_code in (401, 403):
+                    return comp("github", "GitHub (PRs)", "warn",
+                                f"token rejected (HTTP {r.status_code}) — check GITHUB_TOKEN")
+                return comp("github", "GitHub (PRs)", "down",
+                            f"HTTP {r.status_code} from {s.github_api_url}")
+            except Exception as e:  # noqa: BLE001
+                return comp("github", "GitHub (PRs)", "down", f"unreachable: {str(e)[:60]}")
+
+        async def probe_firecrawl():
+            url = s.firecrawl_url
+            if not url:
+                return comp("firecrawl", "Web scraper (Firecrawl)", "unconfigured",
+                            "not configured — the app fetches pages directly (optional)")
+            try:
+                async with httpx.AsyncClient(timeout=8) as c:
+                    r = await c.get(url)
+                return comp("firecrawl", "Web scraper (Firecrawl)",
+                            "ok" if r.status_code < 500 else "down",
+                            f"reachable at {url}" if r.status_code < 500
+                            else f"HTTP {r.status_code} from {url}")
+            except Exception as e:  # noqa: BLE001
+                return comp("firecrawl", "Web scraper (Firecrawl)", "down",
+                            f"unreachable at {url}: {str(e)[:50]}")
+
+        memory_c, sandbox_c, github_c, firecrawl_c = await asyncio.gather(
+            probe_memory(), probe_sandbox(), probe_github(), probe_firecrawl())
+
+        provs = {"anthropic": s.anthropic_api_key, "google": s.google_api_key,
+                 "openai": s.openai_api_key}
+        configured = [k for k, v in provs.items() if v]
+        providers_c = comp("providers", "Model providers", "ok" if configured else "down",
+                           ("configured: " + ", ".join(configured)) if configured
+                           else "no model API key set — at least one is required")
+
+        intakes = [type(i).__name__.replace("Intake", "").lower()
+                   for i in request.app.state.intakes]
+        intakes_c = comp("intakes", "Intake channels", "ok" if intakes else "off",
+                         ", ".join(intakes) if intakes else "none — web UI only")
+
+        auth_c = comp("auth", "API authentication", "ok" if s.auth_token else "warn",
+                      "bearer token required" if s.auth_token
+                      else "disabled — anyone who can reach this port has full access")
+
+        w = request.app.state.worker
+        worker_c = comp("worker", "Task queue", "warn" if w.budget_paused else "ok",
+                        "paused — daily budget reached" if w.budget_paused
+                        else f"{len(w.running)} running / max {w.max_concurrent}")
+
+        return {"version": __version__,
+                "components": [providers_c, memory_c, sandbox_c, github_c,
+                               firecrawl_c, intakes_c, auth_c, worker_c]}
 
     @app.get("/api/stats")
     async def stats(request: Request):
@@ -515,7 +614,15 @@ def create_app() -> FastAPI:
             **({"url": content, "title": title} if is_url else {}),
         })
         if not doc_id:
-            raise HTTPException(502, "memory server rejected the resource")
+            # Classify the failure so the user sees the real cause (down vs auth
+            # vs server error) instead of a generic "rejected".
+            h = await memory.health()
+            if h["state"] == "unreachable":
+                raise HTTPException(503, f"cannot reach memory server at {memory.base_url}")
+            if h["state"] == "unauthorized":
+                raise HTTPException(
+                    502, "memory server rejected the request — check SUPERMEMORY_API_KEY")
+            raise HTTPException(502, "memory server failed to store the resource — see server logs")
         return {"id": doc_id, "scope": body.scope or "global",
                 "kind": "url" if is_url else "text", "title": title}
 
@@ -648,9 +755,19 @@ def create_app() -> FastAPI:
     async def get_agents_config(request: Request):
         return request.app.state.cfg.agents_raw()
 
+    @app.get("/api/config/prompt-defaults")
+    async def get_prompt_defaults():
+        # Built-in system prompts used when a role has no override; surfaced so
+        # the UI can show the default and offer "reset to default".
+        from .prompts import DEFAULT_SUBAGENT_PROMPTS, ORCHESTRATOR_PROMPT
+        return {"orchestrator": ORCHESTRATOR_PROMPT, **DEFAULT_SUBAGENT_PROMPTS}
+
     @app.put("/api/config/agents")
     async def put_agents_config(request: Request, body: dict):
         cfg: ConfigStore = request.app.state.cfg
+        payload_errors = validate_agents_payload(body)
+        if payload_errors:
+            raise HTTPException(400, "; ".join(payload_errors))
         old = cfg.agents_raw()
         cfg.update_agents(body)
         errors = validate_models(cfg.agents())

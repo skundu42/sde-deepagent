@@ -1,12 +1,1 @@
-repos:
-  fable-metro-sumulator:
-    url: https://github.com/skundu42/fable-metro-sumulator
-    default_branch: main
-    description: ''
-    setup: null
-    test: null
-    context: []
-    sandbox: null
-    sandbox_image: null
-    sandbox_network: null
-    approval: null
+repos: {}
