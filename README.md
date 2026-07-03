@@ -67,14 +67,21 @@ Docker must be running (the default sandboxed execution path) unless you set `SA
 
 **Docker Compose (production):**
 
+Uses the prebuilt multi-arch image from GitHub Container Registry
+([`ghcr.io/skundu42/sde-deepagent`](https://github.com/skundu42/sde-deepagent/pkgs/container/sde-deepagent)), so nothing compiles on your box:
+
 ```bash
+git clone https://github.com/skundu42/sde-deepagent.git && cd sde-deepagent
 cp .env.example .env        # set AUTH_TOKEN, SDE_DATA_DIR (absolute path), a model key, GITHUB_TOKEN
-docker compose up -d --build
+docker compose up -d        # pulls ghcr.io/skundu42/sde-deepagent:latest
 
 # first boot only: copy supermemory's generated key into .env, then recreate
 docker compose logs supermemory | grep "api key"
 echo 'SUPERMEMORY_API_KEY=sm_...' >> .env && docker compose up -d
 ```
+
+Pin a version by setting `SDE_IMAGE_TAG=0.3.0` in `.env`. To run your own
+modifications instead of the published image, `docker compose up -d --build`.
 
 Compose publishes both ports on localhost only and refuses to start without `AUTH_TOKEN`; front it with a TLS reverse proxy. On a server, set `REQUIRE_APPROVAL=true` and `DAILY_BUDGET_USD`. It mounts the host Docker socket to launch sandbox containers, so treat access to the control plane as host-root-equivalent.
 
@@ -177,3 +184,18 @@ npm run build               # refresh web/dist (commit it with your change)
 ```
 
 Layout: `src/sde_deepagent/`: `agent_factory.py` (deepagents wiring) · `runner.py` (task pipeline) · `worker.py` (queue + budgets + retention) · `gitops.py` (git/PR) · `sandbox.py` (container sandbox) · `repo_reader.py` (chat's read-only repo clones) · `memory.py` (Supermemory client) · `chat.py` (assistant) · `pricing.py` (cost tracking) · `intake/` (telegram/slack/linear) · `server.py` (API + SSE) · `web/` (React UI).
+
+### Releases
+
+Cutting a release is one tag push:
+
+1. Bump `version` in `pyproject.toml` and move the `Unreleased` changelog
+   section to the new version in `CHANGELOG.md`.
+2. `git tag vX.Y.Z && git push origin vX.Y.Z`
+
+The Release workflow then re-runs lint and the full test suite, verifies the
+tag matches `pyproject.toml`, builds the `linux/amd64` + `linux/arm64` image,
+pushes it to GHCR as `X.Y.Z`, `X.Y` and `latest`, and publishes a GitHub
+release whose notes come from the changelog section plus generated commit
+notes. Every push to `main` also refreshes a rolling `edge` image for people
+who want to track development.

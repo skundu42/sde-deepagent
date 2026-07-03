@@ -4,10 +4,49 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.3.0] - 2026-07-03
+
+A reliability, bounded-growth and polish release: the web UI is rebuilt on
+React + shadcn/ui, transient provider errors retry and resume instead of
+failing the task, hitting the daily budget parks work instead of killing it,
+controller memory and database growth are now bounded, and releases ship as
+prebuilt multi-arch container images on GHCR.
 
 ### Added
 
+- **New web UI (React + Vite + Tailwind + shadcn/ui)** replacing the vanilla-JS
+  SPA: sidebar navigation, light/dark theme, responsive layout, live agent
+  trace with per-agent color rails, status filter pills, and a token dialog
+  that reconnects the SSE streams once auth is entered. The built UI
+  (`web/dist`) is committed, so deployments still need no Node; a CI job
+  rebuilds it to catch a broken or stale bundle.
+- **Transient-error resilience.** Connection failures and provider 429/5xx
+  responses during the agent stream now retry up to 3 times with backoff,
+  resuming from the task's last checkpoint so completed steps are never
+  re-billed (without a checkpointer the error still fails fast, since a
+  from-scratch replay would double-bill).
+- **Mid-run spend persistence.** Token usage is flushed to the DB every
+  `USAGE_FLUSH_SECONDS` (default 30) during a run, so a hard crash cannot lose
+  in-flight spend from the daily-budget total, and a resumed run's per-task
+  budget carries forward from what was actually spent.
+- **Daily-cap parking.** A task stopped by the daily budget is re-queued with
+  its checkpoint intact and resumes automatically after the UTC midnight
+  reset, instead of being marked failed with its checkpoint deleted. Intake
+  channels are not notified for parked (non-finished) tasks.
+- **Retention sweeps.** A daily sweep prunes finished-task events and
+  chat-spend rows older than `RETENTION_DAYS` (default 90; open tasks keep
+  their full traces) and removes chat reference clones unused for
+  `REF_CLONE_RETENTION_DAYS` (default 14), keeping the database and disk
+  bounded.
+- **Release pipeline.** Tagging `vX.Y.Z` re-runs the checks, builds a
+  multi-arch (amd64 + arm64) image, publishes it to
+  `ghcr.io/skundu42/sde-deepagent` as `X.Y.Z`, `X.Y` and `latest`, and creates
+  the GitHub release from this changelog. Pushes to `main` publish a rolling
+  `edge` image. Docker Compose now pulls the published image by default
+  (`SDE_IMAGE_TAG` pins a version; `--build` still builds from source).
+- Fault-injection tests covering every runner teardown path (cancel, timeout,
+  task and daily budget stops, crashes), plus real-subprocess tests for the
+  new capped output readers.
 - **`/ask` in Slack & Telegram.** Mention/DM (Slack) or send (Telegram)
   `/ask <question>` to query the chat assistant about any past or running task and
   the long-term memory/knowledge base, instead of creating a task. Each chat/thread
@@ -24,6 +63,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **`/api/health` is now just `{ok, version}`.** The endpoint is public
+  (unauthenticated) and used to fingerprint the deployment: which providers
+  are configured, whether auth and the sandbox are on, active intake channels.
+  That configuration block moved into the authenticated `/api/status` response
+  as `config`.
+- Chat's repo-reading clones refresh on a TTL (`REF_CLONE_TTL_MINUTES`,
+  default 15) instead of serving the first-clone snapshot forever; when the
+  remote is unreachable the stale clone is served rather than erroring.
+- Em and en dashes were removed from the README and every UI-visible string
+  (including server-emitted status details and error messages).
 - The budget now charges models absent from the price table at the priciest known
   rate (fail-safe) instead of `$0`, so a typo'd/unknown model id can no longer slip
   past the per-task and daily caps. The first unpriced response is now flagged in
@@ -32,6 +81,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The controller can no longer be OOMed by runaway command output.** Sandbox
+  execs and git plumbing buffered a child's entire output before truncating;
+  both now drain pipes incrementally with hard caps (60 KB formatted for
+  sandbox execs, 5 MB for git plumbing) while still reading to EOF, so capped
+  children never deadlock on a full pipe.
+- A re-run of a previously failed or parked task clears its stale error once
+  it completes.
 - **Intake no longer creates duplicate tasks.** Telegram (offset resets to 0 on
   restart), Linear (in-memory dedup lost on restart; old `_already_tracked` only
   scanned the last 500 tasks), and a Linear poll-vs-webhook race could each
@@ -198,6 +254,7 @@ implement → test → review → PR pipeline, multi-channel intake (web UI,
 Telegram, Slack, Linear), per-role model/effort configuration, daily budget
 tracking, and long-term memory.
 
+[0.3.0]: https://github.com/skundu42/sde-deepagent/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/skundu42/sde-deepagent/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/skundu42/sde-deepagent/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/skundu42/sde-deepagent/releases/tag/v0.1.0
