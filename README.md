@@ -1,42 +1,69 @@
 # sde-deepagent
 
-**A self-hostable software developer agent system.** Assign it a task from the web UI, Telegram, Slack, or Linear, and it clones the right codebase, plans, implements the change, runs the tests, and opens a pull request.
+**A self-hostable software developer agent system.** Assign it a task from the
+web UI, Telegram, Slack, or Linear, and it clones the right codebase, plans,
+implements the change, runs the tests, and opens a pull request.
 
-Built on [LangChain deepagents](https://docs.langchain.com/oss/python/deepagents/overview). Bring a model API key (Anthropic, Google Gemini, and/or OpenAI) and Docker for the default sandboxed execution path; everything else (queue, storage, UI, event streaming, long-term memory) runs on your own infrastructure.
+[![CI](https://github.com/skundu42/sde-deepagent/actions/workflows/ci.yml/badge.svg)](https://github.com/skundu42/sde-deepagent/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/skundu42/sde-deepagent)](https://github.com/skundu42/sde-deepagent/releases)
+[![Container](https://img.shields.io/badge/ghcr.io-skundu42%2Fsde--deepagent-blue)](https://github.com/skundu42/sde-deepagent/pkgs/container/sde-deepagent)
+![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue) ![self--hosted](https://img.shields.io/badge/deployment-self--hosted-green) ![tests](https://img.shields.io/badge/tests-318%20passing-brightgreen) ![license](https://img.shields.io/badge/license-MIT-blue)
+Built on [LangChain deepagents](https://docs.langchain.com/oss/python/deepagents/overview).
+Bring a model API key (Anthropic, Google Gemini, and/or OpenAI) and Docker;
+everything else (queue, storage, UI, event streaming, long-term memory) runs
+on your own infrastructure.
 
----
+## Highlights
 
-## Features
+- **Full task pipeline**: isolated git workspace, plan, implement, test until
+  green, diff review, commit, push, GitHub PR
+- **Orchestrator + subagents** (explorer / coder / tester / reviewer), model
+  and reasoning effort configurable per role, providers freely mixed
+- **Multi-channel intake**: web UI, allowlisted Telegram/Slack, Linear
+  (seatless agent sessions or polling), results posted back to the source
+- **Sandboxed execution**: each repo's shell runs in its own reused Docker
+  container
+- **Human oversight**: approval gate, mid-task steering, one-click PR
+  revisions on the same branch
+- **Cost control and resilience**: per-task and daily budgets, automatic retry
+  and resume on provider hiccups and restarts
+- **Long-term memory and chat**: agents recall past learnings per codebase;
+  ask the assistant about any task, repo, or ingested doc
 
-| Feature | What it does |
+## Quick start
+
+Runs the prebuilt multi-arch image from
+[GHCR](https://github.com/skundu42/sde-deepagent/pkgs/container/sde-deepagent);
+nothing compiles on your box:
+
+```bash
+git clone https://github.com/skundu42/sde-deepagent.git && cd sde-deepagent
+cp .env.example .env        # set AUTH_TOKEN, SDE_DATA_DIR (absolute path), a model key, GITHUB_TOKEN
+docker compose up -d        # pulls ghcr.io/skundu42/sde-deepagent:latest
+
+# first boot only: copy supermemory's generated key into .env, then recreate
+docker compose logs supermemory | grep "api key"
+echo 'SUPERMEMORY_API_KEY=sm_...' >> .env && docker compose up -d
+```
+
+Then open http://localhost:8321, register a codebase, and queue your first
+task. Pin a version with `SDE_IMAGE_TAG=0.3.0` in `.env`; run from source with
+`docker compose up -d --build`, or without Docker at all via
+`uv sync && uv run sde-deepagent` (see the [deployment guide](docs/deployment.md)).
+
+## Documentation
+
+| Guide | Contents |
 |---|---|
-| **Orchestrator + subagents** | explorer / coder / tester / reviewer, with model *and* reasoning effort configurable per role, providers freely mixed |
-| **Full task pipeline** | isolated git workspace, plan, implement, test until green, diff review, commit, push, GitHub PR |
-| **Multi-channel intake** | web UI, allowlisted Telegram/Slack, and Linear: delegate an issue to the agent's OAuth app (seatless, via agent-session webhooks) or use a personal key for label/assignee polling; results posted back to the source channel |
-| **Sandboxed execution** | each repo's shell runs in its own reused Docker container, isolated from the host and other repos' workspaces |
-| **Long-term memory** | self-hosted [Supermemory](https://supermemory.ai/docs/self-hosting/overview): recalls conventions and gotchas from past tasks, records new learnings per codebase |
-| **Company context** | per-repo doc globs, convention files (`AGENTS.md`, `CLAUDE.md`, ...), a global `context/` folder, and a Resources page that ingests any URL or text |
-| **Cost control** | per-task budgets that abort runaway runs, a daily budget that parks work until the next day, live spend in the UI |
-| **Resilience** | transient provider errors retry with backoff and resume from the last checkpoint; restarts resume interrupted tasks; spend is persisted mid-run |
-| **Human oversight** | optional approval gate (nothing ships until you review the diff), mid-task steering, one-click PR revisions on the same branch |
-| **Chat** | ask an assistant about any past or running task, grounded in the actual records, traces, memory, and repo source; from the web UI or `/ask <question>` in Slack/Telegram |
-| **Observability** | every message, tool call, shell command, and token persisted in SQLite and streamed live over SSE, with retention sweeps that keep the database bounded |
+| [Deployment](docs/deployment.md) | local and production setup, security posture, sidecars |
+| [Configuration](docs/configuration.md) | environment variables, models, agents, codebases, secrets, company context |
+| [Architecture](docs/architecture.md) | how a task runs, reliability, sandboxing, security model |
+| [HTTP API](docs/api.md) | REST + SSE endpoints behind the UI |
+| [Development](docs/development.md) | working on the backend and web UI, CI, cutting releases |
 
-## Supported models
-
-Set models per role in `config/agents.yaml` (or UI > Agents) as `provider:model`. Any model from a known provider works; the picks below are just the UI dropdown shortcuts.
-
-| Provider | Prefix | Curated picks |
-|---|---|---|
-| Anthropic | `anthropic:` | `claude-opus-4-8`, `claude-sonnet-4-6`, `claude-haiku-4-5-20251001` |
-| Google Gemini | `google_genai:` | `gemini-3.1-pro-preview`, `gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-2.5-flash-lite` |
-| OpenAI | `openai:` | `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.4-nano`, `gpt-5-mini`, `gpt-4.1`, `o3`, `o4-mini` |
-
-Each role also takes an `effort: low | medium | high` knob that maps to the provider's native control (OpenAI `reasoning_effort`, Anthropic `effort`, Gemini `thinking_level`).
-
-## Architecture
+## How it works
 
 ```
  Telegram ─┐
@@ -50,152 +77,17 @@ Each role also takes an `effort: low | medium | high` knob that maps to the prov
             Supermemory ◀── learnings ┘   (self-hosted long-term memory)
 ```
 
-Single process: FastAPI server, asyncio worker pool, SQLite persistence, and a prebuilt React web UI served as static files. Supermemory runs as a sidecar (compose service or local binary).
+A single process (FastAPI + asyncio worker pool + SQLite) with a React web UI
+and an optional Supermemory sidecar. Every message, tool call, shell command
+and token is persisted and streamed live over SSE.
 
-## Setup
+## Contributing
 
-**Local:**
+Issues and pull requests are welcome. Start with the
+[development guide](docs/development.md); `uv run pytest` and
+`uv run ruff check src tests` must pass, and UI changes should ship a
+rebuilt `web/dist`.
 
-```bash
-git clone https://github.com/skundu42/sde-deepagent.git && cd sde-deepagent
-cp .env.example .env        # add at least one model key, plus GITHUB_TOKEN to open PRs
-uv sync
-uv run sde-deepagent        # then open http://localhost:8321
-```
+## License
 
-Docker must be running (the default sandboxed execution path) unless you set `SANDBOX_DEFAULT=false`. No Node.js needed: the built UI ships in the repo.
-
-**Docker Compose (production):**
-
-Uses the prebuilt multi-arch image from GitHub Container Registry
-([`ghcr.io/skundu42/sde-deepagent`](https://github.com/skundu42/sde-deepagent/pkgs/container/sde-deepagent)), so nothing compiles on your box:
-
-```bash
-git clone https://github.com/skundu42/sde-deepagent.git && cd sde-deepagent
-cp .env.example .env        # set AUTH_TOKEN, SDE_DATA_DIR (absolute path), a model key, GITHUB_TOKEN
-docker compose up -d        # pulls ghcr.io/skundu42/sde-deepagent:latest
-
-# first boot only: copy supermemory's generated key into .env, then recreate
-docker compose logs supermemory | grep "api key"
-echo 'SUPERMEMORY_API_KEY=sm_...' >> .env && docker compose up -d
-```
-
-Pin a version by setting `SDE_IMAGE_TAG=0.3.0` in `.env`. To run your own
-modifications instead of the published image, `docker compose up -d --build`.
-
-Compose publishes both ports on localhost only and refuses to start without `AUTH_TOKEN`; front it with a TLS reverse proxy. On a server, set `REQUIRE_APPROVAL=true` and `DAILY_BUDGET_USD`. It mounts the host Docker socket to launch sandbox containers, so treat access to the control plane as host-root-equivalent.
-
-Then in the UI: **Codebases** > register a repo (git URL or local path, test command) > **New task** > watch the live trace; the PR link appears when it ships.
-
-## Configuration
-
-All runtime settings come from `.env` (see [`.env.example`](.env.example) for the full annotated list):
-
-| Variable | Purpose |
-|---|---|
-| `ANTHROPIC_API_KEY` / `GOOGLE_API_KEY` / `OPENAI_API_KEY` | model providers (at least one required) |
-| `GITHUB_TOKEN`, `GITHUB_API_URL` | push branches + open PRs (GitHub / GHE) |
-| `AUTH_TOKEN` | bearer token for the API/UI; required for any non-loopback bind |
-| `SDE_DATA_DIR` | absolute host data path (task DB + workspaces); required by Compose |
-| `SUPERMEMORY_BASE_URL`, `SUPERMEMORY_API_KEY` | long-term memory (optional) |
-| `FIRECRAWL_API_URL` / `FIRECRAWL_API_KEY` | JS-rendering scraper for the Resources page (optional) |
-| `TELEGRAM_BOT_TOKEN`, `SLACK_BOT_TOKEN` + `SLACK_APP_TOKEN`, `LINEAR_WEBHOOK_SECRET` + `LINEAR_OAUTH_TOKEN` (seatless) or `LINEAR_API_KEY` (legacy) | intake channels (each optional) |
-| `TELEGRAM_ALLOWED_CHATS`, `SLACK_ALLOWED_USERS` | authorized chat/user IDs; empty denies task creation, `*` allows all |
-| `TASK_BUDGET_USD`, `DAILY_BUDGET_USD` | cost guardrails (0 = unlimited); hitting the daily cap parks running tasks to resume after the UTC midnight reset |
-| `REQUIRE_APPROVAL` | hold every task for human review before push/PR |
-| `SECRETS_KEY` | enables UI-entered per-repo secrets, encrypted at rest |
-| `SANDBOX_DEFAULT`, `SANDBOX_IMAGE`, `SANDBOX_NETWORK`, `SANDBOX_IDLE_HOURS` | sandbox defaults (on; `buildpack-deps:bookworm`; `bridge`; reused for 7 idle days) |
-| `RETENTION_DAYS`, `REF_CLONE_TTL_MINUTES`, `REF_CLONE_RETENTION_DAYS` | bounded growth: prune old events/chat spend after 90 days, refresh chat's reference clones every 15 minutes, drop unused clones after 14 days |
-| `MAX_CONCURRENT_TASKS`, `TASK_TIMEOUT_SECONDS`, `WORKSPACE_RETENTION`, `USAGE_FLUSH_SECONDS` | runtime tuning |
-
-**Agents, in `config/agents.yaml`** (or UI > Agents): pick the orchestrator and per-subagent models/effort, plus optional `mcp_servers:` (extra tools for the orchestrator) and `pricing:` overrides.
-
-```yaml
-orchestrator:
-  model: openai:gpt-5.4
-  effort: medium
-subagents:
-  explorer:  { model: anthropic:claude-haiku-4-5-20251001 }
-  coder:     { model: google_genai:gemini-2.5-pro }   # mix providers freely
-  reviewer:  { model: openai:o4-mini }
-```
-
-**Codebases, in `config/repos.yaml`** (or UI > Codebases): the `description` powers automatic task-to-repo routing; `test` is how the agent verifies its work.
-
-```yaml
-repos:
-  backend:
-    url: git@github.com:acme/backend.git
-    default_branch: main
-    description: "Python FastAPI monolith serving the public API"
-    setup: "uv sync"
-    test: "uv run pytest -x -q"
-    context: [docs/architecture.md]
-```
-
-**Per-repo secrets** (setup/tests that need credentials): reference a host env var (`secrets: { DB_URL: env:BACKEND_DB_URL }`, no app-side storage) or store a value encrypted at rest (`DB_URL: store`, needs `SECRETS_KEY`). Values are injected *only* into the controller-run `setup`/`test` commands, never the agent's own shell, and redacted (raw/base64/url-encoded) from every output sink. Residual risk: tests run the repo's own code with the secret in the environment, so attach secrets only to repos you trust, prefer `sandbox_network: none`, and keep `REQUIRE_APPROVAL=true`.
-
-## How a task runs
-
-1. **Resolve** the target codebase (explicit, or model-routed by repo descriptions).
-2. **Clone** into an isolated workspace on branch `agent/<id>-<slug>`; start (or reuse) the repo's sandbox container and run its setup command, otherwise the agent installs what it needs on the fly.
-3. **Recall**: search long-term memory for conventions and prior learnings about this codebase.
-4. **Plan and implement**: todo-list planning, delegation to subagents, real shell + filesystem scoped to the workspace.
-5. **Test** until green with the repo's test command.
-6. **Review**: the reviewer subagent audits the final diff.
-7. **Ship**: commit, push, open the PR. With `REQUIRE_APPROVAL=true` the task instead parks as *awaiting approval* with the diff in the UI for one-click ship/reject.
-8. **Record and report**: durable learnings and the outcome are saved to memory; the result (with PR link) is posted back to the source channel.
-
-Transient provider failures (connection drops, 429s, 5xx) retry automatically with backoff and resume from the last checkpoint, so completed steps are never re-billed. Steer a running task at any time (UI steer bar or `POST /api/tasks/{id}/steer`), and **revise** a completed task to continue on the same branch; the existing PR updates in place. `GITHUB_REVIEW_POLLING=true` auto-queues revisions for review comments from repository owners, members, and collaborators.
-
-## HTTP API
-
-The UI is a thin client over a plain REST API:
-
-```
-GET  /api/health             GET  /api/stats              GET  /api/models
-GET  /api/status             GET  /api/tasks              POST /api/tasks
-GET  /api/tasks/{id}         POST /api/tasks/{id}/cancel  POST /api/tasks/{id}/steer
-POST /api/tasks/{id}/approve POST /api/tasks/{id}/reject
-GET  /api/tasks/{id}/events  GET  /api/tasks/{id}/stream  (SSE)
-GET  /api/stream (SSE)       GET/POST/DELETE /api/repos
-GET/PUT /api/config/agents   POST /api/chat               DELETE /api/chat/{id}
-GET/POST/DELETE /api/resources                            POST /webhooks/linear
-```
-
-`POST /api/tasks` takes `{title, description, repo?, model?, budget_usd?, parent_id?}`.
-
-## Development
-
-```bash
-uv sync
-uv run pytest               # backend tests
-uv run sde-deepagent
-```
-
-The web UI lives in `web/` (React + Vite + Tailwind + [shadcn/ui](https://ui.shadcn.com)). The built output in `web/dist/` is committed, so Node is only needed when changing the UI:
-
-```bash
-cd web
-npm install
-npm run dev                 # dev server proxying /api to localhost:8321
-npx vitest run              # UI unit tests
-npm run build               # refresh web/dist (commit it with your change)
-```
-
-Layout: `src/sde_deepagent/`: `agent_factory.py` (deepagents wiring) · `runner.py` (task pipeline) · `worker.py` (queue + budgets + retention) · `gitops.py` (git/PR) · `sandbox.py` (container sandbox) · `repo_reader.py` (chat's read-only repo clones) · `memory.py` (Supermemory client) · `chat.py` (assistant) · `pricing.py` (cost tracking) · `intake/` (telegram/slack/linear) · `server.py` (API + SSE) · `web/` (React UI).
-
-### Releases
-
-Cutting a release is one tag push:
-
-1. Bump `version` in `pyproject.toml` and move the `Unreleased` changelog
-   section to the new version in `CHANGELOG.md`.
-2. `git tag vX.Y.Z && git push origin vX.Y.Z`
-
-The Release workflow then re-runs lint and the full test suite, verifies the
-tag matches `pyproject.toml`, builds the `linux/amd64` + `linux/arm64` image,
-pushes it to GHCR as `X.Y.Z`, `X.Y` and `latest`, and publishes a GitHub
-release whose notes come from the changelog section plus generated commit
-notes. Every push to `main` also refreshes a rolling `edge` image for people
-who want to track development.
+[MIT](LICENSE)
