@@ -335,6 +335,22 @@ class Database:
         out["total"] = sum(out.values())
         return out
 
+    async def prune_history(self, cutoff_ts: float) -> tuple[int, int]:
+        """Retention sweep: drop event rows older than cutoff for FINISHED
+        tasks (an open task keeps its full trace regardless of age) and
+        chat-spend rows older than cutoff (the daily budget only ever sums
+        today's). Returns (events_deleted, chat_rows_deleted). Freed pages are
+        reused by SQLite, so the file stops growing without a blocking VACUUM."""
+        cur = await self.db.execute(
+            "DELETE FROM events WHERE ts < ? AND task_id IN "
+            "(SELECT id FROM tasks WHERE status IN ('completed','failed','cancelled'))",
+            (cutoff_ts,))
+        events_deleted = cur.rowcount or 0
+        cur = await self.db.execute("DELETE FROM chat_spend WHERE ts < ?", (cutoff_ts,))
+        chat_deleted = cur.rowcount or 0
+        await self.db.commit()
+        return events_deleted, chat_deleted
+
     # ---- events ----
 
     async def add_event(

@@ -203,27 +203,11 @@ def create_app() -> FastAPI:
     # ---- health & stats ----
 
     @app.get("/api/health")
-    async def health(request: Request):
-        s = request.app.state.settings
-        return {
-            "ok": True,
-            "version": __version__,
-            "providers": {
-                "anthropic": bool(s.anthropic_api_key),
-                "google": bool(s.google_api_key),
-                "openai": bool(s.openai_api_key),
-            },
-            "github": bool(s.github_token),
-            "memory": bool(s.supermemory_base_url and s.supermemory_api_key),
-            "firecrawl": bool(s.firecrawl_url),
-            "require_approval": s.require_approval,
-            "auth": bool(s.auth_token),
-            "sandbox_default": s.sandbox_default,
-            "review_polling": s.github_review_polling and bool(s.github_token),
-            "intakes": [type(i).__name__.replace("Intake", "").lower()
-                        for i in request.app.state.intakes],
-            "running": len(request.app.state.worker.running),
-        }
+    async def health():
+        # public (no auth): keep it to a liveness bit. The deployment
+        # fingerprint (providers, auth on/off, intakes, ...) is on /api/status,
+        # which sits behind the auth middleware.
+        return {"ok": True, "version": __version__}
 
     @app.get("/api/status")
     async def status(request: Request):
@@ -320,7 +304,20 @@ def create_app() -> FastAPI:
 
         return {"version": __version__,
                 "components": [providers_c, memory_c, sandbox_c, github_c,
-                               firecrawl_c, intakes_c, auth_c, worker_c]}
+                               firecrawl_c, intakes_c, auth_c, worker_c],
+                # deployment fingerprint (moved off the public /api/health)
+                "config": {
+                    "providers": {k: bool(v) for k, v in provs.items()},
+                    "github": bool(s.github_token),
+                    "memory": bool(s.supermemory_base_url and s.supermemory_api_key),
+                    "firecrawl": bool(s.firecrawl_url),
+                    "require_approval": s.require_approval,
+                    "auth": bool(s.auth_token),
+                    "sandbox_default": s.sandbox_default,
+                    "review_polling": s.github_review_polling and bool(s.github_token),
+                    "intakes": intakes,
+                    "running": len(w.running),
+                }}
 
     @app.get("/api/stats")
     async def stats(request: Request):

@@ -117,6 +117,13 @@ class Settings(BaseSettings):
     # --- chat code-reading reference clones ---
     # re-fetch a ref clone when its last fetch is older than this (0 = never refresh)
     ref_clone_ttl_minutes: float = 15.0
+    # remove ref clones not read for this many days (0 = keep forever)
+    ref_clone_retention_days: float = 14.0
+
+    # --- history retention (0 = keep forever) ---
+    # events of finished tasks and chat-spend rows older than this are pruned
+    # by a daily sweep; open tasks keep their traces regardless of age
+    retention_days: float = 90.0
 
     @property
     def db_path(self) -> Path:

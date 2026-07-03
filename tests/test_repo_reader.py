@@ -151,3 +151,28 @@ async def test_ensure_clone_touches_use_stamp(temp_env, tmp_path):
     os.utime(stamp, (old, old))
     await reader.ensure_clone(str(origin))
     assert time.time() - stamp.stat().st_mtime < 60  # re-stamped on every use
+
+
+async def test_prune_ref_clones_removes_only_stale(temp_env, tmp_path):
+    import os
+    import time
+
+    from sde_deepagent.repo_reader import prune_ref_clones
+
+    origin_a, origin_b = tmp_path / "a", tmp_path / "b"
+    await _make_origin(origin_a)
+    await _make_origin(origin_b)
+    settings = get_settings()
+    reader = RepoReader(settings)
+    stale = await reader.ensure_clone(str(origin_a))
+    fresh = await reader.ensure_clone(str(origin_b))
+
+    old = time.time() - 30 * 86400
+    stamp = stale / ".git" / "sde-use-stamp"
+    os.utime(stamp, (old, old))
+
+    removed = prune_ref_clones(settings)  # default retention: 14 days
+
+    assert [stale.name] == removed
+    assert not stale.exists()
+    assert fresh.exists()

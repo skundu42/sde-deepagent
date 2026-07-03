@@ -150,3 +150,29 @@ class RepoReader:
         if code not in (0, 1):  # git grep exits 1 on "no matches", which isn't an error
             raise GitError(out[-400:] or "git grep failed")
         return [ln for ln in out.splitlines() if ln.strip()][:limit]
+
+
+def prune_ref_clones(settings: Settings) -> list[str]:
+    """Remove reference clones not read for REF_CLONE_RETENTION_DAYS (their
+    use stamp drives this; a stampless dir counts as stale). Sync — call via
+    asyncio.to_thread. Returns the removed directory names."""
+    retention = settings.ref_clone_retention_days * 86400
+    if retention <= 0 or not settings.ref_clones_dir.is_dir():
+        return []
+    removed: list[str] = []
+    cutoff = time.time() - retention
+    for clone in settings.ref_clones_dir.iterdir():
+        if not (clone / ".git").is_dir():
+            continue
+        stamp = clone / ".git" / USE_STAMP
+        try:
+            last_used = stamp.stat().st_mtime
+        except OSError:
+            last_used = 0.0
+        if last_used < cutoff:
+            shutil.rmtree(clone, ignore_errors=True)
+            removed.append(clone.name)
+    if removed:
+        logger.info("pruned %d unused ref clone(s): %s",
+                    len(removed), ", ".join(removed))
+    return removed
