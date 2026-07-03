@@ -79,7 +79,8 @@ class Settings(BaseSettings):
     data_dir: Path = Path("data")
     config_dir: Path = Path("config")
     context_dir: Path = Path("context")
-    ui_dir: Path = Path("ui")
+    # built web UI (React + shadcn); web/dist is committed so deploys need no Node
+    ui_dir: Path = Path("web/dist")
     max_concurrent_tasks: int = 2
     task_timeout_seconds: int = 3600
     recursion_limit: int = 1000

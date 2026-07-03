@@ -141,7 +141,7 @@ class TelegramIntake:
             reply = res.get("reply") or "(no reply)"
         except Exception:  # noqa: BLE001 — a chat error must not kill the poll loop
             logger.exception("telegram /ask failed for chat %s", chat_id)
-            reply = "Sorry — I couldn't answer that right now."
+            reply = "Sorry: I couldn't answer that right now."
         await self._send(client, chat_id, reply, reply_to=reply_to)
 
     async def _send(self, client: httpx.AsyncClient, chat_id: int, text: str,

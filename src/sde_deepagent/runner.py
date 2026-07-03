@@ -130,7 +130,7 @@ class TaskRunner:
     async def resolve_repo(self, task: Task) -> RepoConfig:
         repos = self.cfg.repos()
         if not repos:
-            raise GitError("no codebases registered — add one in the UI or config/repos.yaml")
+            raise GitError("no codebases registered: add one in the UI or config/repos.yaml")
         if task.repo:
             if task.repo not in repos:
                 raise GitError(
@@ -287,7 +287,7 @@ class TaskRunner:
                 if tracker.unpriced_models and not tracker.unpriced_warned:
                     tracker.unpriced_warned = True
                     await self.emit(task.id, "log", {
-                        "text": "model(s) not in the price table — billed at the "
+                        "text": "model(s) not in the price table: billed at the "
                                 "priciest known rate as a budget fail-safe: "
                                 + ", ".join(sorted(tracker.unpriced_models))
                                 + " (add a pricing: override in agents.yaml for "
@@ -385,7 +385,7 @@ class TaskRunner:
             await self.emit(task.id, "log", {"text": "changes left unshipped (auto_finalize off)"})
             return None
         await self.emit(task.id, "log",
-                        {"text": "agent left work without a PR — auto-finalizing"})
+                        {"text": "agent left work without a PR: auto-finalizing"})
         if dirty:
             await commit_all(ws, self._redact(task.id, f"feat: {task.title[:70]}"))
         await push_branch(ws, self.settings)
@@ -514,7 +514,7 @@ class TaskRunner:
                                 or not self.secret_store.available):
                 await self.emit(task.id, "log", {
                     "text": "this repo has stored secrets but SECRETS_KEY is not "
-                            "configured — they are unavailable; set SECRETS_KEY to "
+                            "configured: they are unavailable; set SECRETS_KEY to "
                             "enable them"})
             if missing_secrets:
                 await self.emit(task.id, "log", {
@@ -556,7 +556,7 @@ class TaskRunner:
                 from . import sandbox as sbx
                 if not sbx.docker_available():
                     raise GitError(
-                        "tasks run sandboxed but Docker is unavailable — refusing "
+                        "tasks run sandboxed but Docker is unavailable: refusing "
                         "to run untrusted commands on the host. Install/start Docker, "
                         "or opt out (SANDBOX_DEFAULT=false, or sandbox: false on "
                         "this repo) to run on the host.")
@@ -611,7 +611,7 @@ class TaskRunner:
                                 {"name": "setup", "output": out[-2000:], "exit_code": code})
                 if code != 0:
                     await self.emit(task.id, "log",
-                                    {"text": "setup failed — continuing, agent may retry"})
+                                    {"text": "setup failed: continuing, agent may retry"})
 
             agents_cfg = self.cfg.agents()
             tracker = CostTracker(

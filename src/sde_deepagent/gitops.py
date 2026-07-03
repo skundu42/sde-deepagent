@@ -379,7 +379,7 @@ async def create_pull_request(
             "GitHub-style remotes"
         )
     if not settings.github_token:
-        raise GitError("GITHUB_TOKEN is not set — cannot create a pull request")
+        raise GitError("GITHUB_TOKEN is not set: cannot create a pull request")
     host, owner, repo = parsed
     if host.lower() not in trusted_github_hosts(settings):
         raise GitError(

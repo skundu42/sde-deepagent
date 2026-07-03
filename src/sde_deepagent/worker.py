@@ -104,12 +104,12 @@ class Worker:
         if spend >= limit:
             if not self.budget_paused:
                 logger.warning(
-                    "daily budget reached ($%.2f of $%.2f) — pausing task pickup "
+                    "daily budget reached ($%.2f of $%.2f): pausing task pickup "
                     "until UTC midnight", spend, limit)
             self.budget_paused = True
             return False
         if self.budget_paused:
-            logger.info("daily budget headroom restored — resuming task pickup")
+            logger.info("daily budget headroom restored: resuming task pickup")
         self.budget_paused = False
         return True
 
