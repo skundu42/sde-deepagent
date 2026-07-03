@@ -19,7 +19,7 @@ from .db import Database
 from .gitops import GitError, parse_remote
 from .llm import normalize_model_id
 from .memory import GLOBAL_TAG, Memory, memory_from_settings, repo_tag
-from .pricing import CostTracker
+from .pricing import CostTracker, DailyBudget, DailyBudgetExceeded
 from .repo_reader import RepoReader
 from .settings import Settings
 
@@ -308,10 +308,14 @@ def make_chat_tools(db: Database, settings: Settings, cfg: ConfigStore,
 
 
 class ChatService:
-    def __init__(self, db: Database, cfg: ConfigStore, settings: Settings):
+    def __init__(self, db: Database, cfg: ConfigStore, settings: Settings,
+                 daily_budget: DailyBudget | None = None):
         self.db = db
         self.cfg = cfg
         self.settings = settings
+        # shared accountant: chat's in-flight spend counts toward the daily cap
+        # while it runs and is enforced between agent steps, like task runs
+        self.daily_budget = daily_budget
         self.sessions: dict[str, list[Any]] = {}
         self._locks: dict[str, asyncio.Lock] = {}
 
@@ -342,25 +346,37 @@ class ChatService:
             system_prompt=CHAT_PROMPT,
         )
         sent = len(history)
-        result = await agent.ainvoke({"messages": list(history)},
-                                     config={"recursion_limit": 40})
-        messages = result.get("messages", [])
-        self.sessions[session_id] = _safe_trim(messages, MAX_HISTORY_MESSAGES)
-
-        # chat spend counts against the daily budget like everything else
+        # Stream the agent state so spend is metered per model response (not
+        # once at the end): the daily cap is checked between steps, and the
+        # in-flight cost is visible to every other budget gate while running.
         tracker = CostTracker(default_model=model_id, overrides=agents_cfg.pricing)
-        for msg in messages[sent:]:
-            meta = getattr(msg, "usage_metadata", None)
-            if meta:
-                resp_meta = getattr(msg, "response_metadata", None) or {}
-                tracker.add_usage(meta, resp_meta.get("model_name"))
-        if tracker.input_tokens or tracker.output_tokens:
-            try:
-                await self.db.add_chat_spend(
-                    session_id, model_id, tracker.input_tokens,
-                    tracker.output_tokens, round(tracker.cost_usd, 6))
-            except Exception:  # noqa: BLE001 — bookkeeping must not break the reply
-                logger.exception("failed to record chat spend")
+        budget_key = f"chat:{session_id}"
+        if self.daily_budget is not None:
+            self.daily_budget.track(budget_key, tracker)
+        metered = sent
+        messages: list[Any] = []
+        try:
+            async for state in agent.astream({"messages": list(history)},
+                                             config={"recursion_limit": 40},
+                                             stream_mode="values"):
+                if isinstance(state, dict):
+                    messages = state.get("messages", messages)
+                for msg in messages[metered:]:
+                    meta = getattr(msg, "usage_metadata", None)
+                    if meta:
+                        resp_meta = getattr(msg, "response_metadata", None) or {}
+                        tracker.add_usage(meta, resp_meta.get("model_name"))
+                metered = len(messages)
+                await self._enforce_daily_budget()
+        except DailyBudgetExceeded:
+            history.pop()  # the turn never completed; keep the session consistent
+            raise
+        finally:
+            # record whatever was spent, even when the turn aborted mid-run
+            await self._record_spend(session_id, model_id, tracker)
+            if self.daily_budget is not None:
+                self.daily_budget.untrack(budget_key)
+        self.sessions[session_id] = _safe_trim(messages, MAX_HISTORY_MESSAGES)
 
         reply = ""
         for msg in reversed(messages):
@@ -374,6 +390,27 @@ class ChatService:
                 break
         return {"session_id": session_id, "reply": reply or "(no reply)",
                 "cost_usd": round(tracker.cost_usd, 6)}
+
+    async def _enforce_daily_budget(self) -> None:
+        """Abort the turn the moment cumulative daily spend (persisted + every
+        in-flight task AND chat) reaches the cap, mirroring the task runner."""
+        if self.daily_budget is None or self.daily_budget.limit_usd <= 0:
+            return
+        spent = await self.daily_budget.spent_usd()
+        if spent >= self.daily_budget.limit_usd:
+            raise DailyBudgetExceeded(spent, self.daily_budget.limit_usd)
+
+    async def _record_spend(self, session_id: str, model_id: str,
+                            tracker: CostTracker) -> None:
+        if not (tracker.input_tokens or tracker.output_tokens):
+            return
+        try:
+            await self.db.add_chat_spend(
+                session_id, model_id, tracker.input_tokens,
+                tracker.output_tokens, round(tracker.cost_usd, 6))
+            tracker.persisted_usd = tracker.cost_usd  # row now carries it
+        except Exception:  # noqa: BLE001 — bookkeeping must not break the reply
+            logger.exception("failed to record chat spend")
 
     def reset(self, session_id: str) -> bool:
         self._locks.pop(session_id, None)

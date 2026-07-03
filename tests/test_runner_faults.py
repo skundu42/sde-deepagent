@@ -415,3 +415,115 @@ async def test_worker_skips_notify_for_requeued_task(temp_env):
         assert notified == []  # a parked task is not a finished task
     finally:
         await db.close()
+
+
+# ---- daily accounting: mid-run flushes must not double-count ----
+
+
+async def test_flushed_spend_not_double_counted(ck_runner, tmp_path, monkeypatch):
+    """Flush after every response; two equal-cost responses. Old accounting
+    saw flushed + live = 2x after the first flush and tripped a cap set at
+    2.5x one response; correct accounting (1x, then 2x) completes."""
+    from sde_deepagent.pricing import lookup_price
+
+    ck_runner.settings.usage_flush_seconds = 0
+    task = await _demo_task(ck_runner, tmp_path)
+    p_in, p_out = lookup_price("claude-sonnet-4-6")
+    per_msg = (1000 * p_in + 100 * p_out) / 1_000_000  # _usage_msg's shape
+    ck_runner.daily_budget.limit_usd = 2.5 * per_msg
+
+    class TwoStep:
+        def __init__(self, ws):
+            self.ws = ws
+
+        def astream(self, _input, **_k):
+            return self._run()
+
+        async def _run(self):
+            yield ((), {"orchestrator": {"messages": [_usage_msg("m1")]}})
+            yield ((), {"orchestrator": {"messages": [_usage_msg("m2")]}})
+
+    _wire_agent(monkeypatch, TwoStep)
+    out = await ck_runner.run(task)
+    assert out.status == "completed"  # double-counting would have parked it
+
+
+# ---- graceful shutdown parks instead of cancelling ----
+
+
+async def test_shutdown_cancel_parks_checkpointed_task(ck_runner, tmp_path, monkeypatch):
+    task = await _demo_task(ck_runner, tmp_path)
+    _wire_agent(monkeypatch,
+                lambda ws: HangingAgent(ws, checkpointer=ck_runner.checkpointer,
+                                        thread_id=task.id))
+
+    run = asyncio.create_task(ck_runner.run(task))
+    await _wait_for_first_message(ck_runner, task.id)
+    ck_runner.shutting_down = True  # what Worker.stop() sets before cancelling
+    run.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await run
+
+    refreshed = await ck_runner.db.get_task(task.id)
+    assert refreshed.status == "queued"          # parked, not cancelled
+    assert refreshed.finished_at is None
+    assert refreshed.input_tokens == 1000        # spend persisted on the way out
+    # checkpoint survives so the next boot resumes this task
+    assert await ck_runner.checkpointer.aget_tuple(
+        {"configurable": {"thread_id": task.id}}) is not None
+    events = await ck_runner.db.list_events(task.id)
+    assert not any(e["kind"] == "status" and e["content"].get("status") == "cancelled"
+                   for e in events)
+    assert any(e["kind"] == "status" and e["content"].get("reason") == "shutdown"
+               for e in events)
+
+
+async def test_shutdown_without_checkpointer_still_cancels(plain_runner, tmp_path,
+                                                           monkeypatch):
+    # no checkpoint to resume from -> a from-scratch replay would re-bill, so
+    # shutdown keeps the terminal cancel semantics
+    task = await _demo_task(plain_runner, tmp_path)
+    _wire_agent(monkeypatch, lambda ws: HangingAgent(ws))
+
+    run = asyncio.create_task(plain_runner.run(task))
+    await _wait_for_first_message(plain_runner, task.id)
+    plain_runner.shutting_down = True
+    run.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await run
+    refreshed = await plain_runner.db.get_task(task.id)
+    assert refreshed.status == "cancelled"
+
+
+async def test_operator_cancel_still_terminal_when_not_shutting_down(
+        ck_runner, tmp_path, monkeypatch):
+    task = await _demo_task(ck_runner, tmp_path)
+    _wire_agent(monkeypatch,
+                lambda ws: HangingAgent(ws, checkpointer=ck_runner.checkpointer,
+                                        thread_id=task.id))
+    run = asyncio.create_task(ck_runner.run(task))
+    await _wait_for_first_message(ck_runner, task.id)
+    run.cancel()  # shutting_down stays False: this is the user's cancel button
+    with pytest.raises(asyncio.CancelledError):
+        await run
+    refreshed = await ck_runner.db.get_task(task.id)
+    assert refreshed.status == "cancelled"
+    assert await ck_runner.checkpointer.aget_tuple(
+        {"configurable": {"thread_id": task.id}}) is None
+
+
+# ---- explicit budget 0 disables the cap ----
+
+
+async def test_budget_zero_overrides_nonzero_default(plain_runner, tmp_path, monkeypatch):
+    plain_runner.settings.task_budget_usd = 0.0000001  # default would trip instantly
+    task = await _demo_task(plain_runner, tmp_path)
+    await plain_runner.db.db.execute(
+        "UPDATE tasks SET budget_usd = 0 WHERE id = ?", (task.id,))
+    await plain_runner.db.db.commit()
+    task = await plain_runner.db.get_task(task.id)
+    assert task.budget_usd == 0
+
+    _wire_agent(monkeypatch, lambda ws: ScriptedAgent(ws, [None]))
+    out = await plain_runner.run(task)
+    assert out.status == "completed"  # 0 means uncapped, not "use the default"

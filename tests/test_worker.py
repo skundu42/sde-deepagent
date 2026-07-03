@@ -99,3 +99,22 @@ async def test_retention_sweep_prunes_db_and_ref_clones(temp_env, tmp_path, monk
         assert not stale_clone.exists()
     finally:
         await db.close()
+
+
+async def test_stop_flags_runner_as_shutting_down(temp_env):
+    from types import SimpleNamespace
+
+    from sde_deepagent.db import Database
+    from sde_deepagent.settings import get_settings
+    from sde_deepagent.worker import Worker
+
+    settings = get_settings()
+    db = Database(settings.db_path)
+    await db.connect()
+    try:
+        runner = SimpleNamespace(shutting_down=False)
+        w = Worker(db, runner, settings=settings)
+        await w.stop()
+        assert runner.shutting_down is True  # set BEFORE tasks are cancelled
+    finally:
+        await db.close()

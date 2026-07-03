@@ -4,6 +4,47 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-07-03
+
+Follow-up fixes from a post-release review: graceful shutdowns no longer lose
+running work, daily-budget accounting is exact, chat is capped mid-turn, and
+the API token never appears in URLs.
+
+### Security
+
+- **The API token no longer rides in SSE URLs.** The web UI streams
+  server-sent events via `fetch()` with the `Authorization` header, and the
+  backend no longer accepts `?token=` query parameters at all: query strings
+  land in server and reverse-proxy access logs, and this token is
+  control-plane access (host-root-equivalent under Compose).
+
+### Fixed
+
+- **Graceful shutdowns park running tasks instead of cancelling them.**
+  SIGTERM, `docker stop`, deploys and Ctrl+C used to mark every running task
+  `cancelled` and delete its checkpoint; only hard crashes could resume. The
+  runner now distinguishes a shutdown interruption from an operator cancel:
+  checkpointed tasks return to `queued` with checkpoint and workspace intact
+  and resume on the next boot. Operator cancels stay terminal.
+- **Daily spend is no longer double-counted after a mid-run flush.** The
+  accountant summed persisted task cost plus each live tracker's full cost,
+  but the periodic flush writes that cost into the task row while the tracker
+  is still live, so a run counted twice and could park work at roughly half
+  the configured daily budget. Live trackers now contribute only their
+  unpersisted delta.
+- **Chat can no longer blow through the daily budget.** Chat turns were
+  checked once up front and metered only after completion; a long multi-step
+  turn (or several concurrent ones) could overshoot the cap unbounded. Chat
+  now streams the agent, meters spend per model response, counts in-flight
+  cost in the shared daily accountant, and aborts the turn (HTTP 429) the
+  moment the cap is reached; partial spend is recorded even on abort.
+- **An explicit per-task budget of 0 now means "no cap".** It was coerced to
+  null on the way in and fell back to the server default, so a nonzero
+  default could not be overridden to unlimited for one task.
+- `/api/health` reports the real version again: `__version__` now derives
+  from package metadata instead of a second hardcoded constant (0.3.0 shipped
+  reporting 0.2.1).
+
 ## [0.3.0] - 2026-07-03
 
 A reliability, bounded-growth and polish release: the web UI is rebuilt on
@@ -254,6 +295,7 @@ implement → test → review → PR pipeline, multi-channel intake (web UI,
 Telegram, Slack, Linear), per-role model/effort configuration, daily budget
 tracking, and long-term memory.
 
+[0.3.1]: https://github.com/skundu42/sde-deepagent/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/skundu42/sde-deepagent/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/skundu42/sde-deepagent/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/skundu42/sde-deepagent/compare/v0.1.0...v0.2.0

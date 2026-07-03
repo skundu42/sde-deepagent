@@ -27,7 +27,7 @@ from .intake.linear import LinearIntake
 from .intake.slack import SlackIntake
 from .intake.telegram import TelegramIntake
 from .memory import GLOBAL_TAG, memory_from_settings, repo_tag
-from .pricing import DailyBudget
+from .pricing import DailyBudget, DailyBudgetExceeded
 from .runner import TaskRunner
 from .secrets import SecretStore, validate_secret_spec
 from .settings import get_settings, validate_control_plane_security
@@ -129,8 +129,9 @@ async def lifespan(app: FastAPI):
                     settings=settings, daily_budget=daily_budget)
 
     # one chat assistant, shared by the /api/chat route and the Telegram/Slack
-    # `/ask` command (grounded in task records, traces, and long-term memory)
-    chat = ChatService(db, cfg, settings)
+    # `/ask` command (grounded in task records, traces, and long-term memory);
+    # shares the daily-budget accountant so chat spend is capped like task spend
+    chat = ChatService(db, cfg, settings, daily_budget=daily_budget)
     intakes: list[Any] = []
     if settings.telegram_bot_token:
         intakes.append(TelegramIntake(settings, db, chat=chat))
@@ -365,7 +366,9 @@ def create_app() -> FastAPI:
         task = await request.app.state.db.create_task(
             title=body.title, description=body.description or body.title,
             repo=repo, source="ui", model=body.model,
-            budget_usd=body.budget_usd or None, parent_id=body.parent_id,
+            # keep an explicit 0 (= uncapped, overriding the server default);
+            # only an absent value means "use the default"
+            budget_usd=body.budget_usd, parent_id=body.parent_id,
         )
         return task.to_dict()
 
@@ -555,6 +558,9 @@ def create_app() -> FastAPI:
                          f"${budget.limit_usd:.2f}) — chat resumes at UTC midnight")
         try:
             return await request.app.state.chat.ask(body.message, body.session_id)
+        except DailyBudgetExceeded as e:
+            # the cap tripped mid-turn (the pre-check above only fast-fails)
+            raise HTTPException(429, str(e))
         except Exception as e:  # noqa: BLE001 — surface model/tool errors to the UI
             logger.exception("chat failed")
             raise HTTPException(502, f"chat failed: {type(e).__name__}: {e}")

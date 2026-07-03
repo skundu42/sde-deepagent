@@ -97,6 +97,10 @@ class TaskRunner:
         self.mailboxes: dict[str, list[str]] = {}  # task_id -> pending operator messages
         self._redactors: dict[str, Redactor] = {}  # task_id -> secret-value redactor
         self._usage_flushed_at: dict[str, float] = {}  # task_id -> last mid-run flush
+        # set by Worker.stop() before it cancels running tasks, so the
+        # CancelledError handler can tell a server shutdown (park + resume
+        # later) from an operator pressing Cancel (terminal)
+        self.shutting_down = False
         self.db = db
         self.bus = bus
         self.cfg = cfg
@@ -360,6 +364,9 @@ class TaskRunner:
                 output_tokens=tracker.output_tokens,
                 cost_usd=round(tracker.cost_usd, 6),
             )
+            # the DB row now carries this much; the daily accountant must only
+            # add the live delta on top or the run counts double
+            tracker.persisted_usd = tracker.cost_usd
             task.input_tokens = tracker.input_tokens
             task.output_tokens = tracker.output_tokens
             task.cost_usd = round(tracker.cost_usd, 6)
@@ -623,13 +630,19 @@ class TaskRunner:
                 # per-task budget continues from there instead of restarting at $0
                 # (replayed-from-checkpoint calls bill no new tokens)
                 tracker.cost_usd = task.cost_usd or 0.0
+                # already in the DB row (and started_at is reset to today, so
+                # spend_since() sees it): live-count only what accrues on top
+                tracker.persisted_usd = tracker.cost_usd
                 tracker.input_tokens = task.input_tokens or 0
                 tracker.output_tokens = task.output_tokens or 0
             # count this task's spend toward the daily cap while it runs, before
             # its cost is persisted at the end of the run
             self.daily_budget.track(task.id, tracker)
             self._usage_flushed_at[task.id] = time.monotonic()
-            budget = task.budget_usd or self.settings.task_budget_usd
+            # an explicit per-task 0 means "no cap", overriding a nonzero
+            # server default; only an absent value falls back to the default
+            budget = (task.budget_usd if task.budget_usd is not None
+                      else self.settings.task_budget_usd)
 
             async def on_tool_event(kind: str, content: dict) -> None:
                 await self.emit(task.id, kind, content)
@@ -683,10 +696,23 @@ class TaskRunner:
             await self._record_outcome(task, final_text)
         except asyncio.CancelledError:
             await self._persist_usage(task, tracker)
-            await self.db.update_task(task.id, status="cancelled",
-                                      finished_at=time.time())
-            task.status = "cancelled"
-            await self.emit(task.id, "status", {"status": "cancelled"})
+            if (self.shutting_down and self.checkpointer is not None
+                    and not task.parent_id):
+                # server shutdown, not an operator cancel: park the task the
+                # way a hard crash would leave it, so the next boot resumes it
+                # from its checkpoint instead of losing the work. (Revision
+                # threads are never resumed, so they still cancel; without a
+                # checkpointer a from-scratch replay would re-bill, same.)
+                keep_checkpoint = True
+                task.status = "queued"
+                await self.db.update_task(task.id, status="queued")
+                await self.emit(task.id, "status",
+                                {"status": "queued", "reason": "shutdown"})
+            else:
+                await self.db.update_task(task.id, status="cancelled",
+                                          finished_at=time.time())
+                task.status = "cancelled"
+                await self.emit(task.id, "status", {"status": "cancelled"})
             raise
         except DailyBudgetExceeded as e:
             # the account-wide cap pausing the queue is not this task's failure:

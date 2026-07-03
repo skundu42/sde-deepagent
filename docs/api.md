@@ -1,9 +1,11 @@
 # HTTP API
 
 The web UI is a thin client over a plain REST API. With `AUTH_TOKEN` set,
-requests need `Authorization: Bearer <token>`; SSE streams accept
-`?token=<token>` instead (EventSource cannot send headers). `/api/health` and
-`/webhooks/*` are public.
+every request, including the SSE streams, needs
+`Authorization: Bearer <token>`. Query-string tokens are not accepted: they
+would leak into server and proxy access logs. Consume the SSE endpoints with
+a streaming `fetch()` (as the web UI does) rather than `EventSource`, which
+cannot send headers. `/api/health` and `/webhooks/*` are public.
 
 ```
 GET  /api/health             GET  /api/stats              GET  /api/models

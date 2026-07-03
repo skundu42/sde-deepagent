@@ -81,9 +81,5 @@ export async function api<T = any>(path: string, opts: RequestInit = {}): Promis
   return res.json()
 }
 
-/** EventSource cannot send headers, so SSE URLs carry the token as ?token=. */
-export function sseUrl(url: string): string {
-  const token = auth.token
-  if (!token) return url
-  return url + (url.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(token)
-}
+// SSE subscriptions live in ./sse.ts: they stream via fetch() so the token
+// travels in the Authorization header, never in a log-visible query string.

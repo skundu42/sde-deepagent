@@ -224,12 +224,15 @@ async def test_same_session_requests_are_serialized(stack, monkeypatch):
     gauge = {"in_flight": 0, "max": 0}
 
     class FakeAgent:
-        async def ainvoke(self, payload, config=None):
+        def astream(self, payload, config=None, stream_mode=None):
+            return self._run(payload)
+
+        async def _run(self, payload):
             gauge["in_flight"] += 1
             gauge["max"] = max(gauge["max"], gauge["in_flight"])
             await asyncio.sleep(0.02)  # hold the "turn" open to expose overlap
             gauge["in_flight"] -= 1
-            return {"messages": list(payload["messages"]) + [AIMessage(content="r")]}
+            yield {"messages": list(payload["messages"]) + [AIMessage(content="r")]}
 
     monkeypatch.setattr("sde_deepagent.chat.create_agent", lambda **kw: FakeAgent())
     db, settings, cfg = stack
@@ -242,3 +245,63 @@ async def test_same_session_requests_are_serialized(stack, monkeypatch):
     assert gauge["max"] == 1  # serialized: never two turns in flight at once
     contents = [getattr(m, "content", None) for m in svc.sessions["s1"]]
     assert "first" in contents and "second" in contents  # neither message lost
+
+
+# ---- daily budget: chat is metered and capped mid-turn ----
+
+
+def _spendy_message(tokens: int):
+    from langchain_core.messages import AIMessage
+    return AIMessage(
+        content="r", id="a1",
+        usage_metadata={"input_tokens": tokens, "output_tokens": 100,
+                        "total_tokens": tokens + 100},
+        response_metadata={"model_name": "claude-sonnet-4-6"})
+
+
+class _MeteredAgent:
+    def __init__(self, tokens=100_000):
+        self.tokens = tokens
+
+    def astream(self, payload, config=None, stream_mode=None):
+        return self._run(payload)
+
+    async def _run(self, payload):
+        yield {"messages": list(payload["messages"]) + [_spendy_message(self.tokens)]}
+
+
+async def test_chat_daily_cap_aborts_mid_turn(stack, monkeypatch):
+    from sde_deepagent.chat import ChatService
+    from sde_deepagent.pricing import DailyBudget, DailyBudgetExceeded
+
+    db, settings, cfg = stack
+    monkeypatch.setattr("sde_deepagent.chat.create_agent",
+                        lambda **kw: _MeteredAgent())
+    svc = ChatService(db, cfg, settings,
+                      daily_budget=DailyBudget(db, limit_usd=0.000001))
+
+    with pytest.raises(DailyBudgetExceeded):
+        await svc.ask("expensive question", session_id="s-cap")
+
+    # the aborted turn is not left dangling in the session history
+    assert svc.sessions.get("s-cap") == []
+    # ...but the spend that DID happen is recorded against the daily total
+    assert await db.chat_spend_since(0) > 0
+
+
+async def test_chat_within_budget_replies_and_untracks(stack, monkeypatch):
+    from sde_deepagent.chat import ChatService
+    from sde_deepagent.pricing import DailyBudget
+
+    db, settings, cfg = stack
+    monkeypatch.setattr("sde_deepagent.chat.create_agent",
+                        lambda **kw: _MeteredAgent(tokens=10))
+    budget = DailyBudget(db, limit_usd=100.0)
+    svc = ChatService(db, cfg, settings, daily_budget=budget)
+
+    res = await svc.ask("cheap question", session_id="s-ok")
+
+    assert res["reply"] == "r"
+    assert res["cost_usd"] > 0
+    assert budget._live == {}  # untracked once the turn finished
+    assert await db.chat_spend_since(0) == pytest.approx(res["cost_usd"], rel=1e-6)

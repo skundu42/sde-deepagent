@@ -21,7 +21,8 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { Input } from "@/components/ui/input"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Textarea } from "@/components/ui/textarea"
-import { api, sseUrl } from "@/lib/api"
+import { api } from "@/lib/api"
+import { subscribeSse } from "@/lib/sse"
 import { ago, clock, kTokens, money } from "@/lib/format"
 import { cn } from "@/lib/utils"
 import type { Task, TaskEvent, Todo } from "@/lib/types"
@@ -224,7 +225,7 @@ export default function TaskDetailPage() {
   }, [])
 
   useEffect(() => {
-    let es: EventSource | null = null
+    let stream: { close: () => void } | null = null
     let gone = false
     lastIdRef.current = 0
     setEvents([])
@@ -240,15 +241,17 @@ export default function TaskDetailPage() {
         history.forEach((ev) => absorb(ev, false))
         if (t.status === "awaiting_approval" && !history.some((e) => e.kind === "approval_request"))
           setApproval({})
-        es = new EventSource(sseUrl(`/api/tasks/${id}/stream?after=${lastIdRef.current}`))
-        es.onmessage = (e) => absorb(JSON.parse(e.data), true)
+        stream = subscribeSse(
+          `/api/tasks/${id}/stream?after=${lastIdRef.current}`,
+          (data) => absorb(JSON.parse(data), true),
+        )
       } catch (e: any) {
         toast.error(e.message)
       }
     })()
     return () => {
       gone = true
-      es?.close()
+      stream?.close()
     }
   }, [id, absorb])
 

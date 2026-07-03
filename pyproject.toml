@@ -1,6 +1,6 @@
 [project]
 name = "sde-deepagent"
-version = "0.3.0"
+version = "0.3.1"
 description = "Self-hostable software developer agent system built on LangChain deepagents"
 license = {file = "LICENSE"}
 requires-python = ">=3.12"

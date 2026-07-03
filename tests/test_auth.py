@@ -1,5 +1,6 @@
 """Bearer-token auth middleware: protects /api/* (except health), accepts the
-token via header or ?token= query (for SSE), exempts webhooks and the UI shell."""
+token via the Authorization header ONLY (query tokens would leak into access
+logs), exempts webhooks and the UI shell."""
 
 import httpx
 import pytest
@@ -36,11 +37,10 @@ async def test_token_via_header(auth_client):
     assert r.status_code == 200
 
 
-async def test_token_via_query_for_sse(auth_client):
-    # EventSource can't set headers — query param must work
+async def test_query_token_rejected(auth_client):
+    # query strings land in server/proxy access logs, so ?token= must NOT
+    # authenticate (the web UI streams SSE via fetch with the header instead)
     r = await auth_client.get("/api/tasks?token=s3cret")
-    assert r.status_code == 200
-    r = await auth_client.get("/api/tasks?token=wrong")
     assert r.status_code == 401
 
 
@@ -49,9 +49,9 @@ async def test_wrong_token_rejected(auth_client):
     assert r.status_code == 401
 
 
-async def test_query_token_is_stripped_like_header(auth_client):
-    # surrounding whitespace must be tolerated the same way for ?token= and Bearer
-    r = await auth_client.get("/api/tasks", params={"token": "  s3cret  "})
+async def test_header_token_whitespace_tolerated(auth_client):
+    r = await auth_client.get("/api/tasks",
+                              headers={"Authorization": "Bearer   s3cret  "})
     assert r.status_code == 200
 
 

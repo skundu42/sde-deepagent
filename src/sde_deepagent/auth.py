@@ -1,9 +1,14 @@
 """Control-plane access middleware.
 
-With AUTH_TOKEN, API and SSE requests require the bearer token. Without one,
-the entire app is limited to loopback clients, regardless of the ASGI server's
-bind address. This prevents an alternate Uvicorn/Gunicorn invocation from
-accidentally exposing the unauthenticated control plane."""
+With AUTH_TOKEN, API and SSE requests require the bearer token in the
+Authorization header ONLY. Query-string tokens (`?token=`) are deliberately
+not accepted: query strings land in server and reverse-proxy access logs, and
+this token is control-plane access (host-root-equivalent under Compose). The
+web UI streams SSE via fetch(), which can send the header.
+
+Without a token, the entire app is limited to loopback clients, regardless of
+the ASGI server's bind address. This prevents an alternate Uvicorn/Gunicorn
+invocation from accidentally exposing the unauthenticated control plane."""
 
 from __future__ import annotations
 
@@ -24,9 +29,7 @@ def _present_token(request: Request) -> str | None:
     header = request.headers.get("authorization", "")
     if header.startswith("Bearer "):
         return header[len("Bearer "):].strip()
-    token = request.query_params.get("token")
-    # strip the query-param token too, so header and ?token= behave identically
-    return token.strip() if token else None
+    return None
 
 
 class AuthMiddleware(BaseHTTPMiddleware):

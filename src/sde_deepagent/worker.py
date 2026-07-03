@@ -52,6 +52,10 @@ class Worker:
 
     async def stop(self) -> None:
         self._stop.set()
+        # a shutdown interruption is not an operator cancel: the runner parks
+        # checkpointed tasks (status queued, checkpoint kept) so the next boot
+        # resumes them instead of reporting them cancelled
+        self.runner.shutting_down = True
         for t in list(self.running.values()):
             t.cancel()
         to_await = list(self.running.values())

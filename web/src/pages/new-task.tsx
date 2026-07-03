@@ -47,7 +47,8 @@ export default function NewTaskPage() {
           description: description.trim() || title.trim(),
           repo: repo === AUTO ? null : repo,
           model,
-          budget_usd: parseFloat(budget) || null,
+          // keep an explicit 0 (= no cap, overrides the server default)
+          budget_usd: budget.trim() === "" || isNaN(+budget) ? null : +budget,
         }),
       })
       toast.success(`Task ${t.id} queued`)
@@ -138,7 +139,8 @@ export default function NewTaskPage() {
               onChange={(e) => setBudget(e.target.value)}
             />
             <p className="text-xs text-muted-foreground">
-              The run aborts if LLM spend exceeds this.
+              The run aborts if LLM spend exceeds this. An explicit 0 removes
+              the cap even when the server sets a default.
             </p>
           </div>
           <Button onClick={submit} disabled={busy}>

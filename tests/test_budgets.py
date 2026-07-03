@@ -213,3 +213,31 @@ async def test_migration_adds_budget_columns(tmp_path):
     task = await db.get_task("abc")
     assert task.cost_usd == 0.5 and task.input_tokens == 100
     await db.close()
+
+
+async def test_live_usd_counts_only_unpersisted_delta(temp_env):
+    """A mid-run flush writes tracker cost into the task row; the accountant
+    must then count only the live delta, or the run is billed twice."""
+    from types import SimpleNamespace
+
+    from sde_deepagent.pricing import CostTracker, DailyBudget
+
+    class _Db:
+        async def spend_since(self, since):
+            return 1.0  # the flushed portion, now in the DB
+
+    budget = DailyBudget(_Db(), limit_usd=10.0)
+    tracker = CostTracker(default_model="m")
+    tracker.cost_usd = 1.5
+    tracker.persisted_usd = 1.0  # flushed a moment ago
+    budget.track("t1", tracker)
+
+    assert budget.live_usd() == 0.5
+    assert await budget.spent_usd() == 1.5  # NOT 2.5
+
+    # a tracker that persisted everything contributes nothing live
+    done = CostTracker(default_model="m")
+    done.cost_usd = done.persisted_usd = 0.7
+    budget.track("t2", done)
+    assert budget.live_usd() == 0.5
+    _ = SimpleNamespace  # keep import used if _Db changes shape

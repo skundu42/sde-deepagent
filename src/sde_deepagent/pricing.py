@@ -149,6 +149,10 @@ class CostTracker:
     input_tokens: int = 0
     output_tokens: int = 0
     cost_usd: float = 0.0
+    # portion of cost_usd already written to the DB (mid-run flushes). The
+    # daily accountant counts only the delta above this, so a flushed run's
+    # spend is never double-counted (once from the DB row, once live).
+    persisted_usd: float = 0.0
     unpriced_models: set[str] = field(default_factory=set)
     budget_warned: bool = False  # set once the 80% warning has been emitted
     unpriced_warned: bool = False  # set once the unpriced-model warning has fired
@@ -227,8 +231,11 @@ class DailyBudget:
         self._live.pop(task_id, None)
 
     def live_usd(self) -> float:
-        """Unpersisted spend of every in-flight task."""
-        return sum(t.cost_usd for t in self._live.values())
+        """UNPERSISTED spend of every in-flight run: only the delta above what
+        each tracker has already flushed to the DB, which spend_since() is
+        counting from the task/chat rows."""
+        return sum(max(0.0, t.cost_usd - t.persisted_usd)
+                   for t in self._live.values())
 
     async def spent_usd(self) -> float:
         """Persisted spend today + live spend of all in-flight tasks."""

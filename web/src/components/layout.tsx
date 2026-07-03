@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useState } from "react"
 import { NavLink, Outlet, useLocation } from "react-router-dom"
 import {
   Activity,
@@ -26,7 +26,8 @@ import {
 import { Input } from "@/components/ui/input"
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet"
 import { useTheme } from "@/components/theme"
-import { api, auth, sseUrl } from "@/lib/api"
+import { api, auth } from "@/lib/api"
+import { subscribeSse } from "@/lib/sse"
 import { cn } from "@/lib/utils"
 import type { Stats } from "@/lib/types"
 
@@ -172,34 +173,35 @@ export default function Layout() {
   const [needToken, setNeedToken] = useState(false)
   const [authVersion, setAuthVersion] = useState(0)
   const [mobileOpen, setMobileOpen] = useState(false)
-  const esRef = useRef<EventSource | null>(null)
   const location = useLocation()
 
   const refreshStats = useCallback(() => {
     api<Stats>("/api/stats").then(setStats).catch(() => {})
   }, [])
 
-  // global SSE: connection dot, live stats, task-list refresh signal
+  // global SSE: connection dot, live stats, task-list refresh signal.
+  // fetch-based (not EventSource) so the token rides in the Authorization
+  // header instead of a log-visible query string.
   useEffect(() => {
-    const es = new EventSource(sseUrl("/api/stream"))
-    esRef.current = es
-    es.onopen = () => setConnected(true)
-    es.onerror = () => setConnected(false)
-    es.onmessage = (e) => {
-      try {
-        const ev = JSON.parse(e.data)
-        if (ev.kind === "status") {
-          refreshStats()
-          taskEvents.dispatchEvent(new CustomEvent("task-status"))
+    const stream = subscribeSse(
+      "/api/stream",
+      (data) => {
+        try {
+          const ev = JSON.parse(data)
+          if (ev.kind === "status") {
+            refreshStats()
+            taskEvents.dispatchEvent(new CustomEvent("task-status"))
+          }
+        } catch {
+          /* ignore malformed frames */
         }
-      } catch {
-        /* ignore malformed frames */
-      }
-    }
+      },
+      { onOpen: () => setConnected(true), onError: () => setConnected(false) },
+    )
     refreshStats()
     const timer = setInterval(refreshStats, 30_000)
     return () => {
-      es.close()
+      stream.close()
       clearInterval(timer)
     }
   }, [refreshStats, authVersion])
