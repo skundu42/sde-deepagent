@@ -110,6 +110,9 @@ class Settings(BaseSettings):
     # --- LLM cost budgets (USD; 0 = unlimited) ---
     task_budget_usd: float = 0.0   # default per-task cap (overridable per task)
     daily_budget_usd: float = 0.0  # global cap; queue pauses when today's spend hits it
+    # persist an in-flight run's token spend to the DB this often, so a hard
+    # crash can't lose it from the daily total (0 = every model response)
+    usage_flush_seconds: float = 30.0
 
     # --- chat code-reading reference clones ---
     # re-fetch a ref clone when its last fetch is older than this (0 = never refresh)

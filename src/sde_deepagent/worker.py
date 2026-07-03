@@ -101,6 +101,11 @@ class Worker:
         async def _run() -> None:
             try:
                 finished = await self.runner.run(task)
+                if finished.status == "queued":
+                    # parked by the daily cap — it will resume, so don't report
+                    # it to the source channel as if it had finished
+                    logger.info("task %s re-queued (daily budget reached)", task.id)
+                    return
                 for notify in self.notifiers:
                     try:
                         await notify(finished)
