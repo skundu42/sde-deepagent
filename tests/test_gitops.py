@@ -12,7 +12,9 @@ from sde_deepagent.gitops import (
     branch_name_for,
     commit_all,
     commits_ahead,
+    control_git,
     create_pull_request,
+    diff_stat,
     has_changes,
     parse_remote,
     prepare_workspace,
@@ -151,6 +153,84 @@ async def test_workspace_clone_and_commit(temp_env, tmp_path):
     await commit_all(ws, "add new.txt")
     assert not await has_changes(ws)
     assert await commits_ahead(ws) == 1
+
+
+async def test_company_context_is_not_committed(temp_env, tmp_path):
+    """Company-context docs are mounted into the workspace at _context/ for the
+    agent to read, but the controller commits via the trusted control-git dir
+    (a copy of .git snapshotted at clone time). Regression: the _context/
+    exclusion must reach that git dir so `git add -A` never sweeps company docs
+    into the agent's branch/PR."""
+    from sde_deepagent.context import mount_company_context
+
+    settings = get_settings()
+    settings.context_dir.mkdir(parents=True, exist_ok=True)
+    (settings.context_dir / "policy.md").write_text("# internal company policy\n")
+
+    origin = tmp_path / "origin"
+    await _make_origin(origin)
+    repo = RepoConfig(name="demo", url=str(origin), default_branch="main")
+    ws = await prepare_workspace("ctx1", "do it", repo, settings)
+
+    assert mount_company_context(ws.path, settings) == ["policy.md"]
+    assert (ws.path / "_context" / "policy.md").exists()  # mounted for the agent
+
+    (ws.path / "feature.py").write_text("x = 1\n")  # the agent's actual change
+    await commit_all(ws, "agent change")
+
+    committed = await control_git(ws, ["ls-tree", "-r", "--name-only", "HEAD"])
+    assert "feature.py" in committed                 # the real work is committed
+    assert "_context/" not in committed              # company docs never leak in
+
+
+async def test_prepare_workspace_reuse_preserves_edits_and_can_push(temp_env, tmp_path):
+    # resume path: prepare_workspace(reuse_existing=True) early-returns without
+    # re-running git config / control-remote setup. Prove that the config written
+    # on the first run persists on disk, so the reused workspace can still
+    # commit+push (i.e. the skipped setup is genuinely already present).
+    origin = tmp_path / "origin"
+    await _make_origin(origin)
+    settings = get_settings()
+    repo = RepoConfig(name="demo", url=str(origin), default_branch="main")
+
+    ws = await prepare_workspace("tR", "do it", repo, settings)
+    (ws.path / "a.txt").write_text("1\n")
+    await commit_all(ws, "feat: a")
+    await push_branch(ws, settings)
+
+    ws2 = await prepare_workspace("tR", "do it", repo, settings, reuse_existing=True)
+    assert ws2.path == ws.path                 # same clone, not re-cloned
+    assert (ws2.path / "a.txt").exists()        # the agent's prior edits survive
+    (ws2.path / "b.txt").write_text("2\n")
+    await commit_all(ws2, "feat: b")            # uses persisted git identity
+    await push_branch(ws2, settings)            # uses persisted control remote
+
+    code, listing = await run_cmd(
+        ["git", "ls-tree", "-r", "--name-only", ws2.branch], cwd=origin)
+    assert code == 0 and "a.txt" in listing and "b.txt" in listing
+
+
+async def test_revision_clone_can_count_commits_ahead_of_default_branch(temp_env, tmp_path):
+    # a revision clones the agent branch single-branch (--depth implies that), so it
+    # lacks origin/<default_branch>. commits_ahead()/diff_stat() compare against it,
+    # so without the extra fetch they'd read 0-ahead and the finalize/approval gate
+    # would silently drop the revision's committed work.
+    origin = tmp_path / "origin"
+    await _make_origin(origin)
+    settings = get_settings()
+    repo = RepoConfig(name="demo", url=str(origin), default_branch="main")
+
+    # first run: commit + push an agent branch (1 commit ahead of main)
+    ws = await prepare_workspace("t1", "feat", repo, settings)
+    (ws.path / "f.txt").write_text("x\n")
+    await commit_all(ws, "feat: f")
+    await push_branch(ws, settings)
+    assert await commits_ahead(ws) == 1
+
+    # revision: clone that agent branch; origin/main must still be resolvable
+    rev = await prepare_workspace("t2", "rev", repo, settings, existing_branch=ws.branch)
+    assert await commits_ahead(rev) == 1   # would be 0 without the default-branch fetch
+    assert "f.txt" in await diff_stat(rev)
 
 
 async def test_controller_git_ignores_workspace_hooks_and_secrets(

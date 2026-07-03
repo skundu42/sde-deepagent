@@ -63,7 +63,11 @@ class Memory:
                      limit: int = 5) -> list[dict[str, Any]]:
         """Search the given containers, merged and sorted by similarity."""
         results: list[dict[str, Any]] = []
-        async with self._client() as client:
+        # The first hybrid search after a (re)start is slow — supermemory embeds
+        # the query and may run extraction on a cold local model — so give it a
+        # generous timeout; otherwise the default 20s expires and chat silently
+        # finds nothing on the first question.
+        async with self._client(timeout=60) as client:
             for tag in container_tags:
                 try:
                     # hybrid searches extracted memories AND raw chunks, so
@@ -116,15 +120,33 @@ class Memory:
             return False
 
     async def ping(self) -> bool:
+        return (await self.health())["state"] in ("ok", "unauthorized")
+
+    async def health(self) -> dict[str, str]:
+        """Probe the memory server and classify reachability. Returns
+        {"state": ok|unauthorized|unreachable|error, "detail": <human text>}.
+        Distinguishes a down server from an auth mismatch so callers (and the
+        status page) can report the actual cause instead of a generic error."""
         try:
-            async with self._client(timeout=5) as client:
+            async with self._client(timeout=8) as client:
+                # /v3/documents/list is auth-sensitive and fast (no query
+                # embedding, unlike /v4/search which can time out on a cold call).
                 resp = await client.post(
-                    f"{self.base_url}/v4/search", headers=self._headers(),
-                    json={"q": "ping", "containerTag": GLOBAL_TAG, "limit": 1},
+                    f"{self.base_url}/v3/documents/list", headers=self._headers(),
+                    json={"containerTags": [GLOBAL_TAG], "limit": 1},
                 )
-                return resp.status_code < 500
-        except Exception:  # noqa: BLE001
-            return False
+        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout,
+                httpx.RemoteProtocolError) as e:
+            return {"state": "unreachable",
+                    "detail": f"cannot reach memory server at {self.base_url} ({type(e).__name__})"}
+        except Exception as e:  # noqa: BLE001
+            return {"state": "error", "detail": str(e)[:120]}
+        if resp.status_code < 300:
+            return {"state": "ok", "detail": f"reachable at {self.base_url}"}
+        if resp.status_code in (401, 403):
+            return {"state": "unauthorized",
+                    "detail": "authentication rejected — check SUPERMEMORY_API_KEY"}
+        return {"state": "error", "detail": f"HTTP {resp.status_code} from {self.base_url}"}
 
 
 def memory_from_settings(settings: Settings) -> Memory | None:

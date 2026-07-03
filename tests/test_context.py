@@ -1,8 +1,35 @@
 """Context-block assembly: path-traversal containment and the total-size cap."""
 
 from sde_deepagent.config import RepoConfig
-from sde_deepagent.context import MAX_TOTAL_CHARS, build_context_block
+from sde_deepagent.context import (
+    CONTEXT_MOUNT,
+    MAX_TOTAL_CHARS,
+    build_context_block,
+    mount_company_context,
+)
 from sde_deepagent.settings import Settings
+
+
+def test_mount_company_context_skips_dotfiles(tmp_path):
+    # the listing returned to the prompt and the files actually copied must MATCH —
+    # a dotfile (e.g. a real .env) must never be silently materialized into the
+    # agent's workspace while being hidden from the listing
+    ctx = tmp_path / "company"
+    ctx.mkdir()
+    (ctx / "guide.md").write_text("hello")
+    (ctx / ".env").write_text("SECRET=leak")
+    (ctx / ".hidden").mkdir()
+    (ctx / ".hidden" / "creds.txt").write_text("AWS=leak")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    listed = mount_company_context(repo, Settings(context_dir=ctx))
+
+    assert listed == ["guide.md"]
+    dest = repo / CONTEXT_MOUNT
+    assert (dest / "guide.md").exists()
+    assert not (dest / ".env").exists()        # secret NOT materialized
+    assert not (dest / ".hidden").exists()      # nor a hidden dir's contents
 
 
 def _settings(tmp_path):

@@ -4,7 +4,7 @@
 
 Built on [LangChain deepagents](https://docs.langchain.com/oss/python/deepagents/overview). Bring a model API key (Anthropic, Google Gemini, and/or OpenAI) and Docker for the default sandboxed execution path; everything else — queue, storage, UI, event streaming, long-term memory — runs on your own infrastructure.
 
-![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue) ![self--hosted](https://img.shields.io/badge/deployment-self--hosted-green) ![tests](https://img.shields.io/badge/tests-230%20passing-brightgreen) ![license](https://img.shields.io/badge/license-MIT-blue)
+![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue) ![self--hosted](https://img.shields.io/badge/deployment-self--hosted-green) ![tests](https://img.shields.io/badge/tests-262%20passing-brightgreen) ![license](https://img.shields.io/badge/license-MIT-blue)
 
 ---
 
@@ -14,13 +14,13 @@ Built on [LangChain deepagents](https://docs.langchain.com/oss/python/deepagents
 |---|---|
 | **Orchestrator + subagents** | explorer / coder / tester / reviewer — model *and* reasoning effort configurable per role, providers freely mixed |
 | **Full task pipeline** | isolated git workspace → plan → implement → test until green → diff review → commit → push → GitHub PR |
-| **Multi-channel intake** | web UI, allowlisted Telegram/Slack, and Linear (label polling + webhook) — no public URL required; results posted back to the source channel |
+| **Multi-channel intake** | web UI, allowlisted Telegram/Slack, and Linear — delegate an issue to the agent's OAuth app (seatless, via agent-session webhooks) or use a personal key for label/assignee polling; results posted back to the source channel |
 | **Sandboxed execution** | each repo's shell runs in its own reused Docker container, isolated from the host and other repos' workspaces |
 | **Long-term memory** | self-hosted [Supermemory](https://supermemory.ai/docs/self-hosting/overview) — recalls conventions and gotchas from past tasks, records new learnings per codebase |
 | **Company context** | per-repo doc globs, convention files (`AGENTS.md`, `CLAUDE.md`, …), a global `context/` folder, and a Resources page that ingests any URL or text |
 | **Cost control** | per-task budgets that abort runaway runs, a daily budget that pauses the queue, live spend in the UI |
 | **Human oversight** | optional approval gate (nothing ships until you review the diff), mid-task steering, one-click PR revisions on the same branch |
-| **Chat** | ask an assistant about any past or running task — grounded in the actual records, traces, and memory |
+| **Chat** | ask an assistant about any past or running task — grounded in the actual records, traces, and memory; from the web UI or `/ask <question>` in Slack/Telegram |
 | **Observability** | every message, tool call, shell command, and token persisted in SQLite and streamed live over SSE |
 
 ## Supported models
@@ -91,7 +91,7 @@ All runtime settings come from `.env` (see [`.env.example`](.env.example) for th
 | `SDE_DATA_DIR` | absolute host data path (task DB + workspaces); required by Compose |
 | `SUPERMEMORY_BASE_URL`, `SUPERMEMORY_API_KEY` | long-term memory (optional) |
 | `FIRECRAWL_API_URL` / `FIRECRAWL_API_KEY` | JS-rendering scraper for the Resources page (optional) |
-| `TELEGRAM_BOT_TOKEN`, `SLACK_BOT_TOKEN` + `SLACK_APP_TOKEN`, `LINEAR_API_KEY` | intake channels (each optional) |
+| `TELEGRAM_BOT_TOKEN`, `SLACK_BOT_TOKEN` + `SLACK_APP_TOKEN`, `LINEAR_WEBHOOK_SECRET` + `LINEAR_OAUTH_TOKEN` (seatless) or `LINEAR_API_KEY` (legacy) | intake channels (each optional) |
 | `TELEGRAM_ALLOWED_CHATS`, `SLACK_ALLOWED_USERS` | authorized chat/user IDs; empty denies task creation, `*` allows all |
 | `TASK_BUDGET_USD`, `DAILY_BUDGET_USD` | cost guardrails (0 = unlimited) |
 | `REQUIRE_APPROVAL` | hold every task for human review before push/PR |

@@ -81,6 +81,28 @@ async def test_failures_degrade_gracefully():
     assert await mem.ping() is False
 
 
+async def test_health_classifies_states():
+    # unreachable: connection refused
+    def boom(request):
+        raise httpx.ConnectError("refused")
+    mem = Memory("http://sm:6767", "k", transport=httpx.MockTransport(boom))
+    h = await mem.health()
+    assert h["state"] == "unreachable" and "sm:6767" in h["detail"]
+
+    # unauthorized: 401 (key mismatch)
+    mem = Memory("http://sm:6767", "k", transport=httpx.MockTransport(lambda r: httpx.Response(401)))
+    assert (await mem.health())["state"] == "unauthorized"
+
+    # ok: 2xx
+    mem = Memory("http://sm:6767", "k",
+                 transport=httpx.MockTransport(lambda r: httpx.Response(200, json={"results": []})))
+    assert (await mem.health())["state"] == "ok"
+
+    # error: reachable but 5xx
+    mem = Memory("http://sm:6767", "k", transport=httpx.MockTransport(lambda r: httpx.Response(500)))
+    assert (await mem.health())["state"] == "error"
+
+
 def test_memory_from_settings_gating(monkeypatch):
     s = Settings(supermemory_base_url=None, supermemory_api_key=None)
     assert memory_from_settings(s) is None

@@ -51,8 +51,17 @@ class Settings(BaseSettings):
             return "https://api.firecrawl.dev"
         return None
 
+    # Seatless setup: set linear_webhook_secret (inbound, no seat) + optionally
+    # linear_oauth_token (an OAuth app token, actor=app) to post comments as the
+    # app/bot without occupying a seat. linear_api_key is the legacy path: a
+    # personal key (a seat) that also enables polling.
     linear_api_key: str | None = None
-    linear_label: str = "agent"  # issues with this label get picked up
+    linear_oauth_token: str | None = None  # OAuth app token (actor=app); seatless write-back
+    # "label": pick up issues carrying linear_label. "assignee": pick up issues
+    # assigned to the api key's own user (use a key from a dedicated agent member).
+    # assignee mode requires linear_api_key; webhook-only falls back to label.
+    linear_trigger: str = "label"
+    linear_label: str = "agent"  # issues with this label get picked up (trigger=label)
     linear_poll_seconds: int = 30
     linear_webhook_secret: str | None = None
 
@@ -77,6 +86,11 @@ class Settings(BaseSettings):
     auto_finalize: bool = True  # if agent leaves uncommitted work, commit/push/PR it
     require_approval: bool = False  # global default: hold work for approval before push/PR
     workspace_retention: int = 10  # keep N most recent task workspaces on disk
+
+    # --- crash resume ---
+    # (history summarization near the context limit is already on by default via
+    # deepagents' built-in summarization middleware — nothing to configure here)
+    checkpoint_resume: bool = True       # persist agent state; resume interrupted tasks after a restart
 
     # --- sandboxing (one container per repo, reused across tasks) ---
     # Zero-config by default: every repo's tasks run in that repo's container
@@ -109,6 +123,12 @@ class Settings(BaseSettings):
     def control_git_dir(self) -> Path:
         """Trusted Git metadata, deliberately outside sandbox-mounted workspaces."""
         return self.data_dir / "control-git"
+
+    @property
+    def ref_clones_dir(self) -> Path:
+        """Read-only reference clones for the chat assistant's code-reading tools.
+        Kept out of workspaces_dir so the task-workspace reaper never touches them."""
+        return self.data_dir / "ref-clones"
 
     @property
     def sandbox_state_path(self) -> Path:

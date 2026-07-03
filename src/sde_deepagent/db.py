@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -57,7 +58,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     cost_usd REAL,
     created_at REAL NOT NULL,
     started_at REAL,
-    finished_at REAL
+    finished_at REAL,
+    dedup_key TEXT
 );
 CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -120,18 +122,32 @@ class Database:
         self.path = path
         self._db: aiosqlite.Connection | None = None
 
-    async def connect(self) -> None:
+    async def connect(self, resume_interrupted: bool = False) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._db = await aiosqlite.connect(self.path)
         self._db.row_factory = aiosqlite.Row
         await self._db.executescript(SCHEMA)
         await self._migrate()
-        # Anything left "running" from a previous process crashed mid-flight.
+        # dedup index for intake source events (re-deliveries / poll+webhook races).
+        # Created after _migrate so the column exists on upgraded DBs; UI tasks have
+        # a NULL dedup_key, which SQLite treats as distinct (no false conflicts).
         await self._db.execute(
-            "UPDATE tasks SET status='failed', error='interrupted by server restart',"
-            " finished_at=? WHERE status='running'",
-            (time.time(),),
-        )
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_dedup ON tasks(dedup_key)")
+        # A task left "running" was interrupted by a crash/restart. With a durable
+        # checkpointer its agent state survived, so re-queue it to resume from the
+        # last checkpoint; otherwise mark it failed (no state to continue from).
+        if resume_interrupted:
+            # keep started_at: spend_since() filters on it, so nulling it would
+            # drop any already-persisted cost of the interrupted run from the
+            # daily-budget total. run() overwrites it when the task resumes.
+            await self._db.execute(
+                "UPDATE tasks SET status='queued' WHERE status='running'")
+        else:
+            await self._db.execute(
+                "UPDATE tasks SET status='failed', error='interrupted by server restart',"
+                " finished_at=? WHERE status='running'",
+                (time.time(),),
+            )
         await self._db.commit()
 
     async def _migrate(self) -> None:
@@ -140,7 +156,7 @@ class Database:
             existing = {row["name"] for row in await cur.fetchall()}
         for name, decl in [("budget_usd", "REAL"), ("input_tokens", "INTEGER"),
                            ("output_tokens", "INTEGER"), ("cost_usd", "REAL"),
-                           ("parent_id", "TEXT")]:
+                           ("parent_id", "TEXT"), ("dedup_key", "TEXT")]:
             if name not in existing:
                 await self._db.execute(f"ALTER TABLE tasks ADD COLUMN {name} {decl}")
         await self._db.commit()
@@ -167,6 +183,7 @@ class Database:
         model: str | None = None,
         budget_usd: float | None = None,
         parent_id: str | None = None,
+        dedup_key: str | None = None,
     ) -> Task:
         task = Task(
             id=new_task_id(),
@@ -182,15 +199,41 @@ class Database:
         )
         await self.db.execute(
             "INSERT INTO tasks (id, title, description, repo, source, source_ref, status,"
-            " model, parent_id, budget_usd, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            " model, parent_id, budget_usd, created_at, dedup_key)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 task.id, task.title, task.description, task.repo, task.source,
                 json.dumps(task.source_ref), task.status, task.model, task.parent_id,
-                task.budget_usd, task.created_at,
+                task.budget_usd, task.created_at, dedup_key,
             ),
         )
         await self.db.commit()
         return task
+
+    async def create_task_if_new(self, *, dedup_key: str, **kwargs: Any) -> Task | None:
+        """Create a task unless one with the same `dedup_key` already exists.
+
+        Returns the new Task, or None for a duplicate — a re-delivered intake event
+        (e.g. Telegram replaying updates after a restart) or a concurrent poll+webhook
+        ingest of the same issue. The UNIQUE index makes this atomic across the await
+        between the existence check and the insert, so the race can't slip a duplicate
+        through."""
+        if await self._task_by_dedup(dedup_key) is not None:
+            return None
+        try:
+            return await self.create_task(dedup_key=dedup_key, **kwargs)
+        except sqlite3.IntegrityError:
+            try:
+                await self.db.rollback()
+            except Exception:  # noqa: BLE001 — best-effort; the duplicate is what matters
+                pass
+            return None
+
+    async def _task_by_dedup(self, dedup_key: str) -> Task | None:
+        async with self.db.execute(
+            "SELECT * FROM tasks WHERE dedup_key=? LIMIT 1", (dedup_key,)) as cur:
+            row = await cur.fetchone()
+        return self._row_to_task(row) if row else None
 
     def _row_to_task(self, row: aiosqlite.Row) -> Task:
         return Task(

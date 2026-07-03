@@ -136,3 +136,26 @@ async def test_chat_blocked_when_daily_budget_spent(temp_env, monkeypatch):
                 r = await client.post("/api/chat", json={"message": "hi again"})
                 assert r.status_code == 429
                 assert "daily budget" in r.json()["detail"]
+
+
+async def test_ingest_reports_unreachable_vs_unauthorized(temp_env):
+    # Plain-text content skips the URL fetch, so this isolates the memory-add
+    # failure classification.
+    async def run(transport):
+        app = create_app()
+        async with httpx.ASGITransport(app=app) as at:
+            async with app.router.lifespan_context(app):
+                app.state.memory = Memory("http://sm:6767", "k", transport=transport)
+                async with httpx.AsyncClient(transport=at, base_url="http://test") as client:
+                    return await client.post("/api/resources",
+                                             json={"content": "a note", "scope": "global"})
+
+    def boom(req):
+        raise httpx.ConnectError("refused")
+    r = await run(httpx.MockTransport(boom))
+    assert r.status_code == 503
+    assert "sm:6767" in r.json()["detail"]
+
+    r = await run(httpx.MockTransport(lambda req: httpx.Response(401)))
+    assert r.status_code == 502
+    assert "SUPERMEMORY_API_KEY" in r.json()["detail"]

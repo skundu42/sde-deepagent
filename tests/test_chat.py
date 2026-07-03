@@ -3,10 +3,32 @@
 import httpx
 import pytest
 
-from sde_deepagent.chat import ChatService, make_chat_tools
+from sde_deepagent.chat import ChatService, _safe_trim, make_chat_tools
 from sde_deepagent.config import ConfigStore
 from sde_deepagent.db import Database
 from sde_deepagent.settings import get_settings
+
+
+def test_safe_trim_does_not_orphan_tool_results():
+    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+    msgs = [
+        AIMessage(content="", tool_calls=[
+            {"name": "x", "args": {}, "id": "c0", "type": "tool_call"}]),
+        ToolMessage(content="r", tool_call_id="c0"),  # orphaned if it heads the window
+        HumanMessage(content="q1"),
+        AIMessage(content="a1"),
+    ]
+    # naive msgs[-3:] begins on the orphaned ToolMessage (which providers reject)
+    out = _safe_trim(msgs, 3)
+    assert getattr(out[0], "type", "") == "human"
+    assert out == msgs[2:]
+
+
+def test_safe_trim_keeps_recent_within_limit():
+    from langchain_core.messages import HumanMessage
+    msgs = [HumanMessage(content=str(i)) for i in range(100)]
+    out = _safe_trim(msgs, 60)
+    assert len(out) == 60 and out[-1].content == "99"
 
 
 @pytest.fixture
@@ -31,7 +53,9 @@ async def test_list_and_get_task_tools(stack):
     await db.create_task("Add dark mode", "css work", repo="web")
 
     tools = make_chat_tools(db, settings, cfg)
-    assert {t.name for t in tools} == {"list_tasks", "get_task", "get_task_trace"}
+    assert {t.name for t in tools} == {"list_tasks", "get_task", "get_task_trace",
+                                       "list_repos", "get_repo", "list_repo_files",
+                                       "grep_repo", "read_repo_file"}
 
     out = await _tool(tools, "list_tasks").ainvoke({})
     assert t1.id in out and "Fix login" in out and "$0.4200" in out
@@ -57,12 +81,104 @@ async def test_trace_tool(stack):
     assert "STATUS completed" in out
 
 
-async def test_memory_tool_included_when_configured(stack, monkeypatch):
+async def test_memory_tools_included_when_configured(stack, monkeypatch):
     db, settings, cfg = stack
     monkeypatch.setattr(settings, "supermemory_base_url", "http://localhost:6767")
     monkeypatch.setattr(settings, "supermemory_api_key", "sm_x")
     tools = make_chat_tools(db, settings, cfg)
-    assert "search_memory" in {t.name for t in tools}
+    assert {"search_knowledge", "list_resources"} <= {t.name for t in tools}
+
+
+async def test_repo_tools(stack):
+    from sde_deepagent.config import RepoConfig
+    db, settings, cfg = stack
+    cfg.upsert_repo(RepoConfig(
+        name="backend", url="git@github.com:acme/backend.git",
+        description="FastAPI monolith serving the public API", default_branch="main",
+        test="uv run pytest -x -q", context=["docs/arch.md"]))
+    tools = make_chat_tools(db, settings, cfg)
+
+    out = await _tool(tools, "list_repos").ainvoke({})
+    assert "backend" in out and "FastAPI monolith" in out
+
+    out = await _tool(tools, "get_repo").ainvoke({"name": "backend"})
+    assert "uv run pytest" in out and "main" in out and "docs/arch.md" in out
+    out = await _tool(tools, "get_repo").ainvoke({"name": "ghost"})
+    assert "No repo" in out
+
+
+async def _make_origin(path):
+    from sde_deepagent.gitops import run_cmd
+    path.mkdir(parents=True)
+    for args in (["git", "init", "-b", "main"],
+                 ["git", "config", "user.email", "t@t"],
+                 ["git", "config", "user.name", "t"]):
+        await run_cmd(args, cwd=path)
+    (path / "main.py").write_text("def hello():\n    return 'hi'\n")
+    await run_cmd(["git", "add", "-A"], cwd=path)
+    await run_cmd(["git", "commit", "-m", "init"], cwd=path)
+
+
+async def test_code_reading_tools_on_registered_repo(stack, tmp_path):
+    from sde_deepagent.config import RepoConfig
+    db, settings, cfg = stack
+    origin = tmp_path / "origin"
+    await _make_origin(origin)
+    cfg.upsert_repo(RepoConfig(name="backend", url=str(origin), default_branch="main"))
+    tools = make_chat_tools(db, settings, cfg)
+
+    out = await _tool(tools, "list_repo_files").ainvoke({"repo": "backend"})
+    assert "main.py" in out
+
+    out = await _tool(tools, "read_repo_file").ainvoke({"repo": "backend", "path": "main.py"})
+    assert "def hello" in out and "main.py" in out
+
+    out = await _tool(tools, "grep_repo").ainvoke({"repo": "backend", "pattern": "def hello"})
+    assert "main.py" in out
+
+    # security gate: a repo neither registered nor ingested cannot be cloned
+    out = await _tool(tools, "read_repo_file").ainvoke(
+        {"repo": "https://github.com/some/unlisted", "path": "README.md"})
+    assert "isn't available to read" in out
+
+
+def _fake_memory():
+    from sde_deepagent.memory import Memory
+
+    def handler(request):
+        path = request.url.path
+        if path == "/v3/documents/list":
+            return httpx.Response(200, json={"memories": [
+                {"id": "d1", "title": "Welcome to Circles", "status": "done",
+                 "summary": "Circles is a currency framework",
+                 "metadata": {"source": "resource", "kind": "url", "scope": "global",
+                              "url": "https://docs.aboutcircles.com/"}},
+                {"id": "d2", "title": "still indexing", "status": "queued",
+                 "metadata": {"source": "resource", "kind": "text", "scope": "global"}},
+                {"id": "d3", "title": "an agent learning", "status": "done",
+                 "metadata": {"source": "learning"}},  # not a resource → filtered out
+            ]})
+        if path == "/v4/search":
+            return httpx.Response(200, json={"results": [
+                {"memory": "Circles uses an invitation system (96 CRC).", "similarity": 0.9}]})
+        return httpx.Response(404)
+
+    return Memory("http://sm:6767", "k", transport=httpx.MockTransport(handler))
+
+
+async def test_knowledge_and_resource_tools(stack):
+    db, settings, cfg = stack
+    tools = make_chat_tools(db, settings, cfg, memory=_fake_memory())
+    assert {"search_knowledge", "list_resources"} <= {t.name for t in tools}
+
+    out = await _tool(tools, "list_resources").ainvoke({})
+    assert "Welcome to Circles" in out
+    assert "https://docs.aboutcircles.com/" in out
+    assert "an agent learning" not in out          # non-resource docs excluded
+    assert "queued" in out                          # freshness: indexing status surfaced
+
+    out = await _tool(tools, "search_knowledge").ainvoke({"query": "invitation"})
+    assert "invitation system" in out
 
 
 async def test_chat_endpoint(temp_env, monkeypatch):

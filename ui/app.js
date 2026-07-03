@@ -20,17 +20,33 @@ function withToken(url) {
 
 function promptForToken() {
   const t = window.prompt("API token (auth is enabled on this server):");
-  if (t) { AUTH = t.trim(); sessionStorage.setItem("auth_token", AUTH); }
+  if (t) {
+    AUTH = t.trim();
+    sessionStorage.setItem("auth_token", AUTH);
+    onAuthChanged();
+  }
   return !!t;
 }
 
+/* EventSource can't carry a bearer token added after it was opened (the streams
+ * created at boot with an empty token stay 401'd), so when the token changes we
+ * tear down and re-open the live streams with the new one. */
+function onAuthChanged() {
+  connectGlobal();              // re-open the global stats/list stream
+  setTimeout(route, 0);         // re-render the current view -> re-subscribes taskES
+}
+
 async function api(path, opts = {}, _retried = false) {
+  const sentAuth = AUTH;
   const res = await fetch(path, {
     ...opts,
     headers: authHeaders({ "Content-Type": "application/json", ...(opts.headers || {}) }),
   });
-  if (res.status === 401 && !_retried && promptForToken()) {
-    return api(path, opts, true);
+  if (res.status === 401) {
+    // a concurrent request's prompt may have just set a token — retry with it
+    // instead of prompting again
+    if (AUTH !== sentAuth) return api(path, opts, _retried);
+    if (!_retried && promptForToken()) return api(path, opts, true);
   }
   if (!res.ok) {
     let detail = res.statusText;
@@ -76,6 +92,19 @@ const STATUS_COLOR = {
   awaiting_approval: "var(--violet)",
 };
 
+/* Task-list status filter: client-side, multi-select. Held in a module-level
+   set so it survives the SSE-driven renderTasks(false) re-renders; resets on a
+   full page reload (intentionally not persisted). Filtering applies to the
+   loaded set (the newest ≤200 tasks the API returns). */
+const STATUS_ORDER = ["running", "queued", "awaiting_approval", "completed", "failed", "cancelled"];
+let taskFilter = new Set();
+function toggleTaskFilter(status) {
+  if (status === "all") taskFilter.clear();
+  else if (taskFilter.has(status)) taskFilter.delete(status);
+  else taskFilter.add(status);
+  renderTasks(false);
+}
+
 /* Build <optgroup> dropdown options from /api/models.
    `selected` is kept even if it's not in the curated list (custom yaml entries). */
 function modelOptions(catalog, selected, emptyLabel) {
@@ -100,6 +129,7 @@ function modelOptions(catalog, selected, emptyLabel) {
 
 let globalES = null;
 function connectGlobal() {
+  if (globalES) globalES.close();  // re-creatable so a new token can be applied
   globalES = new EventSource(withToken("/api/stream"));
   globalES.onopen = () => $("#conn").classList.add("on");
   globalES.onerror = () => $("#conn").classList.remove("on");
@@ -129,18 +159,24 @@ async function refreshStats() {
 
 async function refreshHealth() {
   try {
-    const h = await api("/api/health");
+    const data = await api("/api/status");
+    const mem = (data.components || []).find((c) => c.key === "memory");
     const el = $("#st-memory");
-    el.textContent = h.memory ? "on" : "off";
-    el.style.color = h.memory ? "var(--green)" : "var(--ink-faint)";
+    if (!el || !mem) return;
+    const word = { ok: "on", down: "down", warn: "warn", unconfigured: "off", off: "off" };
+    el.textContent = word[mem.state] || mem.state;
+    el.style.color = STATUS_DOT[mem.state] || "var(--ink-faint)";
+    el.title = mem.detail;
   } catch {}
 }
 
 /* ---------- router ---------- */
 
 let taskES = null;
+let statusTimer = null;
 function teardown() {
   if (taskES) { taskES.close(); taskES = null; }
+  if (statusTimer) { clearTimeout(statusTimer); statusTimer = null; }
 }
 
 window.addEventListener("hashchange", route);
@@ -159,6 +195,7 @@ function route() {
   if (h === "agents") { setNav("agents"); return renderAgents(); }
   if (h === "chat") { setNav("chat"); return renderChat(); }
   if (h === "resources") { setNav("resources"); return renderResources(); }
+  if (h === "status") { setNav("status"); return renderStatus(); }
   setNav("tasks");
   renderTasks(true);
 }
@@ -169,7 +206,17 @@ async function renderTasks(full) {
   let tasks;
   try { tasks = await api("/api/tasks"); } catch (e) { return toast(e.message, "err"); }
   if (location.hash !== "" && location.hash !== "#/") return; // user navigated away
-  const rows = tasks.map((t, i) => `
+  const counts = {};
+  for (const t of tasks) counts[t.status] = (counts[t.status] || 0) + 1;
+  const active = taskFilter.size > 0;
+  const shown = active ? tasks.filter((t) => taskFilter.has(t.status)) : tasks;
+  const pill = (status, label, count, on) => `
+    <button class="filter-pill${on ? " on" : ""}${count === 0 ? " zero" : ""}"
+            style="--status-color:${STATUS_COLOR[status] || "var(--ink-faint)"}"
+            onclick="toggleTaskFilter('${status}')">${label}<span class="fp-count">${count}</span></button>`;
+  const pills = pill("all", "all", tasks.length, !active) +
+    STATUS_ORDER.map((s) => pill(s, s.replace("_", " "), counts[s] || 0, taskFilter.has(s))).join("");
+  const rows = shown.map((t, i) => `
     <div class="task-row" style="--status-color:${STATUS_COLOR[t.status]}; animation-delay:${Math.min(i * 30, 300)}ms"
          onclick="location.hash='#/task/${t.id}'">
       <span class="task-id">${t.id}</span>
@@ -188,15 +235,22 @@ async function renderTasks(full) {
   main.innerHTML = `
     <div class="view-head">
       <h1 class="view-title">Tasks</h1>
-      <span class="view-sub">${tasks.length} total</span>
+      <span class="view-sub">${active ? `${shown.length} of ${tasks.length}` : `${tasks.length} total`}</span>
       <span class="spacer"></span>
       <button class="btn sm" onclick="location.hash='#/new'">+ New task</button>
     </div>
-    ${tasks.length ? `<div class="task-rows">${rows}</div>` : `
-      <div class="empty">
-        <div class="big">NO TASKS YET</div>
-        Create one here, or send a message via Telegram / Slack / Linear.
-      </div>`}`;
+    ${tasks.length ? `<div class="filter-pills">${pills}</div>` : ""}
+    ${tasks.length === 0
+      ? `<div class="empty">
+          <div class="big">NO TASKS YET</div>
+          Create one here, or send a message via Telegram / Slack / Linear.
+        </div>`
+      : shown.length
+        ? `<div class="task-rows">${rows}</div>`
+        : `<div class="empty">
+            <div class="big">NO MATCHING TASKS</div>
+            No tasks match the selected status filter.
+          </div>`}`;
 }
 
 /* ---------- view: task detail ---------- */
@@ -212,7 +266,7 @@ function renderEvent(ev) {
     body = `<div class="ev-text" style="color:${STATUS_COLOR[c.status] || "var(--ink)"}">▶ ${esc(c.status)}${c.error ? ` — ${esc(c.error)}` : ""}${c.usage?.cost_usd != null ? ` · $${c.usage.cost_usd.toFixed(4)} (${((c.usage.input_tokens + c.usage.output_tokens) / 1000).toFixed(0)}k tok)` : ""}${c.pr_url ? ` · <a href="${esc(c.pr_url)}" target="_blank">PR ↗</a>` : ""}</div>`
       + (c.summary ? `<details class="tool-out"><summary>final summary</summary><pre>${esc(c.summary)}</pre></details>` : "");
   else if (ev.kind === "tool_call")
-    body = `<div class="tool-call">$ <span class="tn">${esc(c.name)}</span>(<span class="ta">${esc(JSON.stringify(c.args)).slice(1, 400)}</span>)</div>`;
+    body = `<div class="tool-call">$ <span class="tn">${esc(c.name)}</span>(<span class="ta">${esc(JSON.stringify(c.args).slice(1, 400))}</span>)</div>`;
   else if (ev.kind === "tool_result")
     body = `<details class="tool-out"><summary>↳ ${esc(c.name || "result")}${c.truncated ? " (truncated)" : ""}</summary><pre>${esc(c.output)}</pre></details>`;
   else if (ev.kind === "pr_opened")
@@ -364,17 +418,23 @@ async function renderTaskDetail(id) {
 
   const timeline = $("#timeline");
   let lastId = 0;
+  // Follow the live tail only while the user is already parked near the bottom.
+  // Once they scroll up (e.g. to the top to read earlier trace), incoming events
+  // stop yanking the page back down.
+  const nearBottom = () =>
+    window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 120;
   const append = (ev, flash) => {
     if (ev.id <= lastId) return;
     lastId = ev.id;
     if (ev.kind === "todos") return renderTodos(ev.content.todos);
     const html = renderEvent(ev);
     if (!html) return;
+    const pinned = nearBottom();          // capture before the DOM grows
     timeline.insertAdjacentHTML("beforeend", html);
     if (flash) {
       const node = timeline.lastElementChild;
       node.classList.add("flash");
-      node.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      if (pinned) node.scrollIntoView({ block: "nearest", behavior: "smooth" });
     }
     if (ev.kind === "status") updateHead(ev.content);
   };
@@ -600,12 +660,62 @@ async function renderRepos() {
 
 /* ---------- view: agents ---------- */
 
+// Placeholders the orchestrator prompt is .format()-ed with (mirrors
+// agent_factory.ORCHESTRATOR_FORMAT_KEYS); shown as an edit hint.
+const ORCH_PLACEHOLDERS = ["repo_name", "repo_description", "branch", "default_branch",
+  "setup_cmd", "test_cmd", "task_description", "exec_environment", "ship_instructions",
+  "repo_map", "context_block"].map((k) => `<code>{${k}}</code>`).join(" ");
+const MCP_TRANSPORTS = ["stdio", "streamable_http", "sse"];
+
+function mcpSummary(spec) {
+  const t = spec.transport || (spec.command ? "stdio" : spec.url ? "streamable_http" : "?");
+  if (spec.command) return esc(`${t} · ${spec.command} ${(spec.args || []).join(" ")}`.trim());
+  if (spec.url) return esc(`${t} · ${spec.url}`);
+  return esc(t);
+}
+function mcpListHtml(cfg) {
+  const servers = cfg.mcp_servers || {};
+  const names = Object.keys(servers);
+  if (!names.length) return `<div class="view-sub" style="padding:4px 0">no MCP servers configured</div>`;
+  return names.map((name) => `
+    <div class="mcp-item">
+      <div><b>${esc(name)}</b> <span class="view-sub">${mcpSummary(servers[name])}</span></div>
+      <button class="btn ghost sm" data-mcp-remove="${esc(name)}">remove</button>
+    </div>`).join("");
+}
+// Parse "KEY=value" lines into an object (for env / headers).
+function parseKv(text) {
+  const out = {};
+  for (const line of text.split("\n").map((s) => s.trim()).filter(Boolean)) {
+    const i = line.indexOf("=");
+    if (i > 0) out[line.slice(0, i).trim()] = line.slice(i + 1).trim();
+  }
+  return out;
+}
+
 async function renderAgents() {
-  let cfg, catalog = {};
+  let cfg, catalog = {}, defaults = {};
   try {
-    [cfg, catalog] = await Promise.all([api("/api/config/agents"), api("/api/models")]);
+    [cfg, catalog, defaults] = await Promise.all([
+      api("/api/config/agents"), api("/api/models"), api("/api/config/prompt-defaults")]);
   } catch (e) { return toast(e.message, "err"); }
+  cfg.mcp_servers ||= {};
   const subs = cfg.subagents || {};
+  const promptBlock = (role, spec, isOrch) => {
+    const def = defaults[role] || "";
+    const eff = spec.system_prompt != null ? spec.system_prompt : def;
+    const overridden = spec.system_prompt != null && spec.system_prompt !== def;
+    return `
+      <div class="prompt-block">
+        <details${overridden ? " open" : ""}>
+          <summary>system prompt — ${overridden
+            ? `<span class="ovr">overridden</span>` : `<span class="view-sub">using built-in default</span>`}</summary>
+          ${isOrch ? `<div class="hint">placeholders (keep intact): ${ORCH_PLACEHOLDERS}</div>` : ""}
+          <textarea class="prompt-ta" data-prompt="${esc(role)}" rows="9" spellcheck="false">${esc(eff)}</textarea>
+          <div><button class="btn ghost sm" data-prompt-reset="${esc(role)}">↺ reset to default</button></div>
+        </details>
+      </div>`;
+  };
   const row = (role, spec, isOrch) => `
     <div class="agent-card">
       <div class="role" style="color:${isOrch ? "var(--green)" : "var(--ink)"}">${esc(role)}
@@ -619,11 +729,12 @@ async function renderAgents() {
           ${["", "low", "medium", "high"].map((e) =>
             `<option value="${e}" ${(spec.effort || "") === e ? "selected" : ""}>${e || "provider default"}</option>`).join("")}
         </select></div>
+      ${promptBlock(role, spec, isOrch)}
     </div>`;
   main.innerHTML = `
     <div class="view-head">
       <h1 class="view-title">Agents</h1>
-      <span class="view-sub">model per role — applies to the next task</span>
+      <span class="view-sub">models, prompts & MCP servers — applies to the next task</span>
     </div>
     <div class="model-hints">
       formats: <code>anthropic:claude-sonnet-4-6</code> · <code>anthropic:claude-opus-4-8</code> ·
@@ -632,10 +743,85 @@ async function renderAgents() {
     </div>
     ${row("orchestrator", cfg.orchestrator || {}, true)}
     ${Object.entries(subs).map(([n, s]) => row(n, s || {}, false)).join("")}
-    <div style="margin-top:18px; display:flex; gap:10px">
-      <button class="btn" id="a-save">✓ Save models</button>
-      <span class="view-sub" style="align-self:center">MCP servers & prompts: edit <b>config/agents.yaml</b></span>
+
+    <div class="mcp-section">
+      <div class="role" style="color:var(--cyan)">MCP servers <small>extra tools for the orchestrator</small></div>
+      <div id="mcp-list">${mcpListHtml(cfg)}</div>
+      <div class="mcp-add">
+        <div class="mcp-add-row">
+          <input id="mcp-name" placeholder="name (e.g. github)">
+          <select id="mcp-transport">${MCP_TRANSPORTS.map((t) => `<option value="${t}">${t}</option>`).join("")}</select>
+        </div>
+        <div id="mcp-stdio-fields">
+          <input id="mcp-command" placeholder="command (e.g. npx)">
+          <textarea id="mcp-args" rows="2" placeholder="args — one per line"></textarea>
+          <textarea id="mcp-env" rows="2" placeholder="env — KEY=value per line"></textarea>
+        </div>
+        <div id="mcp-http-fields" style="display:none">
+          <input id="mcp-url" placeholder="url (https://…/mcp)">
+          <textarea id="mcp-headers" rows="2" placeholder="headers — KEY=value per line"></textarea>
+        </div>
+        <button class="btn ghost sm" id="mcp-add-btn">+ add server</button>
+      </div>
+    </div>
+
+    <div style="margin-top:18px; display:flex; gap:10px; align-items:center">
+      <button class="btn" id="a-save">✓ Save</button>
+      <span class="view-sub">saves models, efforts, prompts & MCP servers</span>
     </div>`;
+
+  document.querySelectorAll("[data-prompt-reset]").forEach((b) => {
+    b.onclick = () => {
+      const role = b.dataset.promptReset;
+      const ta = document.querySelector(`[data-prompt="${CSS.escape(role)}"]`);
+      if (ta) ta.value = defaults[role] || "";
+    };
+  });
+
+  const transportSel = $("#mcp-transport");
+  const syncMcpFields = () => {
+    const stdio = transportSel.value === "stdio";
+    $("#mcp-stdio-fields").style.display = stdio ? "" : "none";
+    $("#mcp-http-fields").style.display = stdio ? "none" : "";
+  };
+  transportSel.onchange = syncMcpFields;
+  syncMcpFields();
+
+  $("#mcp-add-btn").onclick = () => {
+    const name = $("#mcp-name").value.trim();
+    if (!name) return toast("server name required", "err");
+    if (cfg.mcp_servers[name]) return toast("a server with that name already exists", "err");
+    const transport = transportSel.value;
+    let spec;
+    if (transport === "stdio") {
+      const command = $("#mcp-command").value.trim();
+      if (!command) return toast("command required for stdio", "err");
+      spec = { command, transport };
+      const args = $("#mcp-args").value.split("\n").map((s) => s.trim()).filter(Boolean);
+      const env = parseKv($("#mcp-env").value);
+      if (args.length) spec.args = args;
+      if (Object.keys(env).length) spec.env = env;
+    } else {
+      const url = $("#mcp-url").value.trim();
+      if (!url) return toast("url required", "err");
+      spec = { url, transport };
+      const headers = parseKv($("#mcp-headers").value);
+      if (Object.keys(headers).length) spec.headers = headers;
+    }
+    cfg.mcp_servers[name] = spec;
+    $("#mcp-list").innerHTML = mcpListHtml(cfg);
+    ["mcp-name", "mcp-command", "mcp-args", "mcp-env", "mcp-url", "mcp-headers"]
+      .forEach((id) => { $("#" + id).value = ""; });
+    toast("server added — Save to persist", "ok");
+  };
+
+  $("#mcp-list").onclick = (e) => {
+    const btn = e.target.closest("[data-mcp-remove]");
+    if (!btn) return;
+    delete cfg.mcp_servers[btn.dataset.mcpRemove];
+    $("#mcp-list").innerHTML = mcpListHtml(cfg);
+  };
+
   $("#a-save").onclick = async () => {
     document.querySelectorAll("[data-role]").forEach((sel) => {
       const role = sel.dataset.role, v = sel.value;
@@ -647,9 +833,17 @@ async function renderAgents() {
       if (role === "orchestrator") (cfg.orchestrator ||= {}).effort = v;
       else if (cfg.subagents?.[role]) cfg.subagents[role].effort = v;
     });
+    document.querySelectorAll("[data-prompt]").forEach((ta) => {
+      const role = ta.dataset.prompt, val = ta.value;
+      // empty or unchanged-from-default => no override (keep tracking the built-in)
+      const sp = (val.trim() === "" || val === (defaults[role] || "")) ? null : val;
+      if (role === "orchestrator") (cfg.orchestrator ||= {}).system_prompt = sp;
+      else if (cfg.subagents?.[role]) cfg.subagents[role].system_prompt = sp;
+    });
     try {
       await api("/api/config/agents", { method: "PUT", body: JSON.stringify(cfg) });
       toast("agent config saved", "ok");
+      renderAgents();
     } catch (e) { toast(e.message, "err"); }
   };
 }
@@ -658,13 +852,60 @@ async function renderAgents() {
 
 const chatState = { sessionId: sessionStorage.getItem("chat_session") || null, msgs: [] };
 
+/* Minimal, safe Markdown → HTML for assistant replies. Escapes everything first
+   (so no model output can inject raw HTML), then applies a fixed subset:
+   headings, bold/italic, inline + fenced code, links, and ordered/unordered lists. */
+function mdToHtml(src) {
+  const lines = esc(src).replace(/\r\n/g, "\n").split("\n");
+  const inline = (s) => s
+    .replace(/`([^`]+)`/g, (_, c) => `<code>${c}</code>`)
+    .replace(/\*\*([\s\S]+?)\*\*/g, "<strong>$1</strong>")
+    .replace(/(^|[^*])\*([^*\n]+?)\*/g, "$1<em>$2</em>")
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
+             '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  const out = [];
+  let list = null, para = [];
+  const closeList = () => { if (list) { out.push(`</${list}>`); list = null; } };
+  const flushPara = () => { if (para.length) { out.push(`<p>${para.join("<br>")}</p>`); para = []; } };
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (/^```/.test(line)) {                       // fenced code block
+      flushPara(); closeList();
+      const buf = [];
+      for (i++; i < lines.length && !/^```/.test(lines[i]); i++) buf.push(lines[i]);
+      out.push(`<pre><code>${buf.join("\n")}</code></pre>`);
+      continue;
+    }
+    let m;
+    if ((m = line.match(/^(#{1,6})\s+(.*)$/))) {    // heading
+      flushPara(); closeList();
+      const lvl = Math.min(m[1].length + 2, 6);
+      out.push(`<h${lvl}>${inline(m[2])}</h${lvl}>`);
+    } else if ((m = line.match(/^\s*[-*+]\s+(.*)$/))) {  // unordered list
+      flushPara();
+      if (list !== "ul") { closeList(); out.push("<ul>"); list = "ul"; }
+      out.push(`<li>${inline(m[1])}</li>`);
+    } else if ((m = line.match(/^\s*\d+[.)]\s+(.*)$/))) { // ordered list
+      flushPara();
+      if (list !== "ol") { closeList(); out.push("<ol>"); list = "ol"; }
+      out.push(`<li>${inline(m[1])}</li>`);
+    } else if (!line.trim()) {                       // blank line → break
+      flushPara(); closeList();
+    } else {                                         // paragraph text
+      closeList(); para.push(inline(line));
+    }
+  }
+  flushPara(); closeList();
+  return out.join("\n");
+}
+
 function renderChatMsgs() {
   const thread = $("#chat-thread");
   if (!thread) return;
   thread.innerHTML = chatState.msgs.map((m) => `
     <div class="chat-msg ${m.role}">
       <span class="chat-who">${m.role === "user" ? "&gt; you" : "▚▞ sde-deepagent"}${m.cost ? ` <i class="chat-cost">$${m.cost.toFixed(4)}</i>` : ""}</span>
-      <div class="chat-text">${esc(m.text)}</div>
+      <div class="chat-text${m.role === "user" ? "" : " md"}">${m.role === "user" ? esc(m.text) : mdToHtml(m.text)}</div>
     </div>`).join("") +
     (chatState.waiting ? `<div class="chat-msg assistant"><span class="chat-who">▚▞ sde-deepagent</span>
       <div class="chat-text thinking">consulting task history<span class="cursor">█</span></div></div>` : "");
@@ -819,10 +1060,56 @@ async function renderResources() {
   loadList();
 }
 
+/* ---------- view: status ---------- */
+
+const STATUS_DOT = {
+  ok: "var(--green)", warn: "var(--amber)", down: "var(--red)",
+  off: "var(--ink-faint)", unconfigured: "var(--ink-faint)",
+};
+const STATUS_WORD = {
+  ok: "ok", warn: "warn", down: "down", off: "off", unconfigured: "not set",
+};
+
+async function renderStatus() {
+  let data;
+  try { data = await api("/api/status"); } catch (e) { return toast(e.message, "err"); }
+  if (location.hash !== "#/status") return; // user navigated away
+  const rows = data.components.map((c) => `
+    <div class="status-row" style="--dot:${STATUS_DOT[c.state] || "var(--ink-faint)"}">
+      <span class="status-dot"></span>
+      <span class="status-label">${esc(c.label)}</span>
+      <span class="status-state ${esc(c.state)}">${STATUS_WORD[c.state] || esc(c.state)}</span>
+      <span class="status-detail">${esc(c.detail)}</span>
+    </div>`).join("");
+  main.innerHTML = `
+    <div class="view-head">
+      <h1 class="view-title">Status</h1>
+      <span class="view-sub">live health of every component · v${esc(data.version)}</span>
+      <span class="spacer"></span>
+      <button class="btn ghost sm" onclick="renderStatus()">↻ refresh</button>
+    </div>
+    <div class="status-list">${rows}</div>`;
+  clearTimeout(statusTimer);
+  statusTimer = setTimeout(() => { if (location.hash === "#/status") renderStatus(); }, 10000);
+}
+
+/* ---------- scroll-to-top ---------- */
+
+function setupScrollTop() {
+  const btn = $("#scroll-top");
+  if (!btn) return;
+  const toggle = () => btn.classList.toggle("show", window.scrollY > 400);
+  window.addEventListener("scroll", toggle, { passive: true });
+  btn.onclick = () => window.scrollTo({ top: 0, behavior: "smooth" });
+  toggle();
+}
+
 /* ---------- boot ---------- */
 
+setupScrollTop();
 connectGlobal();
 refreshStats();
 refreshHealth();
 setInterval(refreshStats, 30000);
+setInterval(refreshHealth, 30000);
 route();

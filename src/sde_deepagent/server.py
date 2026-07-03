@@ -17,9 +17,10 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
 from . import __version__
-from .agent_factory import validate_models
+from .agent_factory import validate_agents_payload, validate_models
 from .bus import EventBus
 from .chat import ChatService
+from .checkpointing import open_checkpointing
 from .config import ConfigStore, RepoConfig, is_safe_context_pattern
 from .db import Database
 from .intake.linear import LinearIntake
@@ -111,7 +112,10 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     validate_control_plane_security(settings)
     db = Database(settings.db_path)
-    await db.connect()
+    # agent-state checkpointer (durable when langgraph-checkpoint-sqlite is present);
+    # lets a task interrupted by a restart resume from its last checkpoint
+    ckpt = await open_checkpointing(settings) if settings.checkpoint_resume else None
+    await db.connect(resume_interrupted=bool(ckpt and ckpt.durable))
     bus = EventBus()
     cfg = ConfigStore(settings.config_dir)
     # one daily-budget accountant shared by the runner (mid-stream enforcement)
@@ -119,20 +123,26 @@ async def lifespan(app: FastAPI):
     daily_budget = DailyBudget(db, settings.daily_budget_usd)
     secret_store = SecretStore(settings.secrets_store_path, settings.secrets_key)
     runner = TaskRunner(db, bus, cfg, settings, daily_budget=daily_budget,
-                        secret_store=secret_store)
+                        secret_store=secret_store,
+                        checkpointer=ckpt.saver if ckpt else None)
     worker = Worker(db, runner, max_concurrent=settings.max_concurrent_tasks,
                     settings=settings, daily_budget=daily_budget)
 
+    # one chat assistant, shared by the /api/chat route and the Telegram/Slack
+    # `/ask` command (grounded in task records, traces, and long-term memory)
+    chat = ChatService(db, cfg, settings)
     intakes: list[Any] = []
     if settings.telegram_bot_token:
-        intakes.append(TelegramIntake(settings, db))
+        intakes.append(TelegramIntake(settings, db, chat=chat))
     if settings.slack_bot_token and settings.slack_app_token:
-        intakes.append(SlackIntake(settings, db))
+        intakes.append(SlackIntake(settings, db, chat=chat))
     linear: LinearIntake | None = None
-    if settings.linear_api_key:
+    # Enable Linear when there's any way to receive issues: a personal key
+    # (polling, a seat) or a webhook secret (seatless, inbound webhooks).
+    if settings.linear_api_key or settings.linear_webhook_secret:
         linear = LinearIntake(settings, db)
         intakes.append(linear)
-        if not settings.linear_webhook_secret:
+        if settings.linear_api_key and not settings.linear_webhook_secret:
             logger.info("linear: polling enabled; the /webhooks/linear endpoint "
                         "stays disabled (403) until LINEAR_WEBHOOK_SECRET is set")
 
@@ -158,7 +168,7 @@ async def lifespan(app: FastAPI):
     app.state.cfg = cfg
     app.state.worker = worker
     app.state.secret_store = secret_store
-    app.state.chat = ChatService(db, cfg, settings)
+    app.state.chat = chat
     app.state.memory = memory_from_settings(settings)
     app.state.linear = linear
     app.state.intakes = intakes
@@ -175,6 +185,8 @@ async def lifespan(app: FastAPI):
         if review_intake:
             await review_intake.stop()
         await db.close()
+        if ckpt:
+            await ckpt.aclose()
 
 
 def create_app() -> FastAPI:
@@ -213,6 +225,103 @@ def create_app() -> FastAPI:
             "running": len(request.app.state.worker.running),
         }
 
+    @app.get("/api/status")
+    async def status(request: Request):
+        """Per-component health for the Status page. Cheaply probes reachability
+        for the components that can fail silently (memory, Docker, GitHub,
+        Firecrawl); reports configured/derived state for the rest."""
+        import httpx
+
+        from . import sandbox
+
+        s = request.app.state.settings
+        memory = request.app.state.memory
+
+        def comp(key, label, state, detail):
+            return {"key": key, "label": label, "state": state, "detail": detail}
+
+        async def probe_memory():
+            if not memory:
+                return comp("memory", "Long-term memory", "unconfigured",
+                            "SUPERMEMORY_BASE_URL / SUPERMEMORY_API_KEY not set (optional)")
+            h = await memory.health()
+            state = {"ok": "ok", "unauthorized": "warn",
+                     "unreachable": "down", "error": "down"}[h["state"]]
+            return comp("memory", "Long-term memory", state, h["detail"])
+
+        async def probe_sandbox():
+            if not s.sandbox_default:
+                return comp("sandbox", "Sandbox (Docker)", "off",
+                            "sandbox disabled — task shells run on the host")
+            ok = await asyncio.to_thread(sandbox.docker_available)
+            return comp("sandbox", "Sandbox (Docker)", "ok" if ok else "down",
+                        "Docker daemon reachable" if ok
+                        else "Docker not running — tasks will fail at the sandbox step")
+
+        async def probe_github():
+            if not s.github_token:
+                return comp("github", "GitHub (PRs)", "unconfigured", "GITHUB_TOKEN not set")
+            try:
+                async with httpx.AsyncClient(timeout=8) as c:
+                    r = await c.get(f"{s.github_api_url.rstrip('/')}/rate_limit",
+                                    headers={"Authorization": f"Bearer {s.github_token}",
+                                             "Accept": "application/vnd.github+json"})
+                if r.status_code == 200:
+                    core = r.json().get("resources", {}).get("core", {})
+                    return comp("github", "GitHub (PRs)", "ok",
+                                f"token valid (rate {core.get('remaining', '?')}/{core.get('limit', '?')})")
+                if r.status_code in (401, 403):
+                    return comp("github", "GitHub (PRs)", "warn",
+                                f"token rejected (HTTP {r.status_code}) — check GITHUB_TOKEN")
+                return comp("github", "GitHub (PRs)", "down",
+                            f"HTTP {r.status_code} from {s.github_api_url}")
+            except Exception as e:  # noqa: BLE001
+                return comp("github", "GitHub (PRs)", "down", f"unreachable: {str(e)[:60]}")
+
+        async def probe_firecrawl():
+            url = s.firecrawl_url
+            if not url:
+                return comp("firecrawl", "Web scraper (Firecrawl)", "unconfigured",
+                            "not configured — the app fetches pages directly (optional)")
+            try:
+                async with httpx.AsyncClient(timeout=8) as c:
+                    r = await c.get(url)
+                return comp("firecrawl", "Web scraper (Firecrawl)",
+                            "ok" if r.status_code < 500 else "down",
+                            f"reachable at {url}" if r.status_code < 500
+                            else f"HTTP {r.status_code} from {url}")
+            except Exception as e:  # noqa: BLE001
+                return comp("firecrawl", "Web scraper (Firecrawl)", "down",
+                            f"unreachable at {url}: {str(e)[:50]}")
+
+        memory_c, sandbox_c, github_c, firecrawl_c = await asyncio.gather(
+            probe_memory(), probe_sandbox(), probe_github(), probe_firecrawl())
+
+        provs = {"anthropic": s.anthropic_api_key, "google": s.google_api_key,
+                 "openai": s.openai_api_key}
+        configured = [k for k, v in provs.items() if v]
+        providers_c = comp("providers", "Model providers", "ok" if configured else "down",
+                           ("configured: " + ", ".join(configured)) if configured
+                           else "no model API key set — at least one is required")
+
+        intakes = [type(i).__name__.replace("Intake", "").lower()
+                   for i in request.app.state.intakes]
+        intakes_c = comp("intakes", "Intake channels", "ok" if intakes else "off",
+                         ", ".join(intakes) if intakes else "none — web UI only")
+
+        auth_c = comp("auth", "API authentication", "ok" if s.auth_token else "warn",
+                      "bearer token required" if s.auth_token
+                      else "disabled — anyone who can reach this port has full access")
+
+        w = request.app.state.worker
+        worker_c = comp("worker", "Task queue", "warn" if w.budget_paused else "ok",
+                        "paused — daily budget reached" if w.budget_paused
+                        else f"{len(w.running)} running / max {w.max_concurrent}")
+
+        return {"version": __version__,
+                "components": [providers_c, memory_c, sandbox_c, github_c,
+                               firecrawl_c, intakes_c, auth_c, worker_c]}
+
     @app.get("/api/stats")
     async def stats(request: Request):
         from .worker import _utc_midnight_ts
@@ -241,6 +350,12 @@ def create_app() -> FastAPI:
         repos = request.app.state.cfg.repos()
         if body.repo and body.repo not in repos:
             raise HTTPException(400, f"unknown repo '{body.repo}'")
+        if body.model:  # validate the per-task override now, not deep inside run()
+            from .llm import normalize_model_id
+            try:
+                normalize_model_id(body.model)
+            except ValueError as e:
+                raise HTTPException(400, f"invalid model '{body.model}': {e}")
         repo = body.repo
         if body.parent_id:
             parent = await request.app.state.db.get_task(body.parent_id)
@@ -271,7 +386,11 @@ def create_app() -> FastAPI:
         if not task:
             raise HTTPException(404, "task not found")
         if task.status in ("queued", "awaiting_approval"):
-            await db.update_task(task_id, status="cancelled")
+            import time as _time
+            await db.update_task(task_id, status="cancelled",
+                                 finished_at=_time.time())
+            event = await db.add_event(task_id, "status", {"status": "cancelled"})
+            request.app.state.bus.publish(task_id, event)  # so the UI updates live
             return {"status": "cancelled"}
         if task.status == "running":
             if request.app.state.worker.cancel_task(task_id):
@@ -495,7 +614,15 @@ def create_app() -> FastAPI:
             **({"url": content, "title": title} if is_url else {}),
         })
         if not doc_id:
-            raise HTTPException(502, "memory server rejected the resource")
+            # Classify the failure so the user sees the real cause (down vs auth
+            # vs server error) instead of a generic "rejected".
+            h = await memory.health()
+            if h["state"] == "unreachable":
+                raise HTTPException(503, f"cannot reach memory server at {memory.base_url}")
+            if h["state"] == "unauthorized":
+                raise HTTPException(
+                    502, "memory server rejected the request — check SUPERMEMORY_API_KEY")
+            raise HTTPException(502, "memory server failed to store the resource — see server logs")
         return {"id": doc_id, "scope": body.scope or "global",
                 "kind": "url" if is_url else "text", "title": title}
 
@@ -628,9 +755,19 @@ def create_app() -> FastAPI:
     async def get_agents_config(request: Request):
         return request.app.state.cfg.agents_raw()
 
+    @app.get("/api/config/prompt-defaults")
+    async def get_prompt_defaults():
+        # Built-in system prompts used when a role has no override; surfaced so
+        # the UI can show the default and offer "reset to default".
+        from .prompts import DEFAULT_SUBAGENT_PROMPTS, ORCHESTRATOR_PROMPT
+        return {"orchestrator": ORCHESTRATOR_PROMPT, **DEFAULT_SUBAGENT_PROMPTS}
+
     @app.put("/api/config/agents")
     async def put_agents_config(request: Request, body: dict):
         cfg: ConfigStore = request.app.state.cfg
+        payload_errors = validate_agents_payload(body)
+        if payload_errors:
+            raise HTTPException(400, "; ".join(payload_errors))
         old = cfg.agents_raw()
         cfg.update_agents(body)
         errors = validate_models(cfg.agents())

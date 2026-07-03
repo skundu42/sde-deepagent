@@ -10,10 +10,14 @@ from __future__ import annotations
 
 import logging
 import re
+from typing import TYPE_CHECKING
 
 from ..db import Database, Task
 from ..settings import Settings
-from .base import parse_task_text, task_summary
+from .base import parse_ask, parse_task_text, task_summary
+
+if TYPE_CHECKING:
+    from ..chat import ChatService
 
 logger = logging.getLogger(__name__)
 
@@ -21,9 +25,11 @@ MENTION_RE = re.compile(r"<@[\w]+>\s*")
 
 
 class SlackIntake:
-    def __init__(self, settings: Settings, db: Database):
+    def __init__(self, settings: Settings, db: Database,
+                 chat: "ChatService | None" = None):
         self.settings = settings
         self.db = db
+        self.chat = chat  # answers /ask questions over tasks + memory
         self.allowed = settings.slack_allowed_user_ids()
         self.allow_all = settings.slack_allow_all
         self._client = None
@@ -76,15 +82,25 @@ class SlackIntake:
             text = MENTION_RE.sub("", event.get("text", "")).strip()
             if not text:
                 return
+            ts = event.get("ts")  # the message's own timestamp, unique per channel
+            thread = event.get("thread_ts") or ts
+            # /ask answers questions over tasks + memory instead of creating a task
+            question = parse_ask(text)
+            if question is not None:
+                await self._handle_ask(channel, thread, question)
+                return
             repo, title, description = parse_task_text(text)
-            task = await self.db.create_task(
+            # dedup on (channel, message ts) so a re-delivered socket-mode event
+            # doesn't create a second task
+            task = await self.db.create_task_if_new(
                 title=title, description=description, repo=repo, source="slack",
-                source_ref={"channel": channel,
-                            "thread_ts": event.get("thread_ts") or event.get("ts")},
+                source_ref={"channel": channel, "thread_ts": thread},
+                dedup_key=f"slack:{channel}:{ts}",
             )
+            if task is None:
+                return  # already ingested
             await self._web.chat_postMessage(
-                channel=channel,
-                thread_ts=event.get("thread_ts") or event.get("ts"),
+                channel=channel, thread_ts=thread,
                 text=f"🤖 Task `{task.id}` queued: {task.title}",
             )
 
@@ -95,6 +111,25 @@ class SlackIntake:
     async def stop(self) -> None:
         if self._client:
             await self._client.disconnect()
+
+    async def _handle_ask(self, channel: str, thread_ts: str | None,
+                          question: str) -> None:
+        async def post(text: str) -> None:
+            await self._web.chat_postMessage(channel=channel, thread_ts=thread_ts, text=text)
+        if self.chat is None:
+            await post("Chat isn't available on this server.")
+            return
+        if not question:
+            await post("Ask a question after /ask, e.g. `/ask what did task abc123 do?`")
+            return
+        try:
+            # one conversational session per thread (grounded in tasks + memory)
+            res = await self.chat.ask(question, session_id=f"slack:{channel}:{thread_ts}")
+            reply = res.get("reply") or "(no reply)"
+        except Exception:  # noqa: BLE001 — a chat error must not drop the socket listener
+            logger.exception("slack /ask failed in %s", channel)
+            reply = "Sorry — I couldn't answer that right now."
+        await post(reply)
 
     async def notify(self, task: Task) -> None:
         if task.source != "slack" or not self._web:
