@@ -111,6 +111,10 @@ class Settings(BaseSettings):
     task_budget_usd: float = 0.0   # default per-task cap (overridable per task)
     daily_budget_usd: float = 0.0  # global cap; queue pauses when today's spend hits it
 
+    # --- chat code-reading reference clones ---
+    # re-fetch a ref clone when its last fetch is older than this (0 = never refresh)
+    ref_clone_ttl_minutes: float = 15.0
+
     @property
     def db_path(self) -> Path:
         return self.data_dir / "devagent.db"

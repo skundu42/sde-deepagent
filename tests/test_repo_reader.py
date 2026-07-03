@@ -78,3 +78,76 @@ async def test_clone_failure_raises(temp_env, tmp_path):
     reader = RepoReader(get_settings())
     with pytest.raises(GitError, match="clone of .* failed"):
         await reader.ensure_clone(str(tmp_path / "does-not-exist"))
+
+
+# ---- TTL refresh: reads must not serve permanently stale code ----
+
+def _age_fetch_stamp(reader: RepoReader, clone: Path, seconds: float) -> None:
+    """Backdate the clone's last-fetch stamp so the TTL appears expired."""
+    import os
+    import time
+    stamp = clone / ".git" / "sde-fetch-stamp"
+    old = time.time() - seconds
+    os.utime(stamp, (old, old))
+
+
+async def _commit_change(origin: Path, path: str, content: str) -> None:
+    (origin / path).write_text(content)
+    await run_cmd(["git", "add", "-A"], cwd=origin)
+    code, out = await run_cmd(["git", "commit", "-m", "update"], cwd=origin)
+    assert code == 0, out
+
+
+async def test_stale_clone_refreshes_after_ttl(temp_env, tmp_path):
+    origin = tmp_path / "origin"
+    await _make_origin(origin)
+    reader = RepoReader(get_settings())
+    clone = await reader.ensure_clone(str(origin))
+    await _commit_change(origin, "README.md", "# demo v2\n")
+
+    _age_fetch_stamp(reader, clone, seconds=3600)  # past the 15-min default TTL
+    text = await reader.read_file(str(origin), "README.md")
+    assert "demo v2" in text  # served the CURRENT source, not the first-clone snapshot
+
+
+async def test_fresh_clone_not_refetched_within_ttl(temp_env, tmp_path):
+    origin = tmp_path / "origin"
+    await _make_origin(origin)
+    reader = RepoReader(get_settings())
+    await reader.ensure_clone(str(origin))
+    await _commit_change(origin, "README.md", "# demo v2\n")
+
+    # stamp is seconds old — well inside the TTL, so no fetch happens
+    text = await reader.read_file(str(origin), "README.md")
+    assert "demo v2" not in text
+
+
+async def test_refresh_failure_serves_stale_clone(temp_env, tmp_path):
+    import shutil
+
+    origin = tmp_path / "origin"
+    await _make_origin(origin)
+    reader = RepoReader(get_settings())
+    clone = await reader.ensure_clone(str(origin))
+    shutil.rmtree(origin)  # remote gone: fetch will fail
+
+    _age_fetch_stamp(reader, clone, seconds=3600)
+    text = await reader.read_file(str(origin), "README.md")  # must not raise
+    assert "# demo" in text  # stale content beats no content
+
+
+async def test_ensure_clone_touches_use_stamp(temp_env, tmp_path):
+    import os
+    import time
+
+    origin = tmp_path / "origin"
+    await _make_origin(origin)
+    reader = RepoReader(get_settings())
+    clone = await reader.ensure_clone(str(origin))
+    stamp = clone / ".git" / "sde-use-stamp"
+    assert stamp.exists()
+
+    old = time.time() - 86400
+    os.utime(stamp, (old, old))
+    await reader.ensure_clone(str(origin))
+    assert time.time() - stamp.stat().st_mtime < 60  # re-stamped on every use
