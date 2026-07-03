@@ -285,6 +285,108 @@ async def test_task_budget_still_fails(ck_runner, tmp_path, monkeypatch):
 
     assert out.status == "failed"
     assert "budget" in (out.error or "")
+    # a hard budget failure is terminal: its checkpoint must not linger
+    assert await ck_runner.checkpointer.aget_tuple(
+        {"configurable": {"thread_id": task.id}}) is None
+
+
+class HangingAgent:
+    """Reports one usage message (after checkpointing) and then hangs forever —
+    prey for the cancel and timeout teardown paths."""
+
+    def __init__(self, ws, checkpointer=None, thread_id=None):
+        self.ws = ws
+        self.checkpointer = checkpointer
+        self.thread_id = thread_id
+
+    def astream(self, _input, **_kwargs):
+        return self._run()
+
+    async def _run(self):
+        if self.checkpointer is not None:
+            from langgraph.checkpoint.base import empty_checkpoint
+            await self.checkpointer.aput(
+                {"configurable": {"thread_id": self.thread_id, "checkpoint_ns": ""}},
+                empty_checkpoint(), {"source": "test"}, {})
+        yield ((), {"orchestrator": {"messages": [_usage_msg("m1")]}})
+        await asyncio.sleep(3600)
+
+
+async def _wait_for_first_message(r, task_id):
+    for _ in range(500):
+        events = await r.db.list_events(task_id)
+        if any(e["kind"] == "message" for e in events):
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("agent never produced its first message")
+
+
+async def test_cancel_mid_stream_marks_cancelled_and_cleans_up(
+        ck_runner, tmp_path, monkeypatch):
+    task = await _demo_task(ck_runner, tmp_path)
+    _wire_agent(monkeypatch,
+                lambda ws: HangingAgent(ws, checkpointer=ck_runner.checkpointer,
+                                        thread_id=task.id))
+
+    run = asyncio.create_task(ck_runner.run(task))
+    await _wait_for_first_message(ck_runner, task.id)
+    run.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await run
+
+    refreshed = await ck_runner.db.get_task(task.id)
+    assert refreshed.status == "cancelled"
+    assert refreshed.finished_at is not None
+    assert refreshed.input_tokens == 1000  # in-flight spend persisted on the way out
+    events = await ck_runner.db.list_events(task.id)
+    assert any(e["kind"] == "status" and e["content"].get("status") == "cancelled"
+               for e in events)
+    # teardown released the run's state: steering box, flush clock, checkpoint
+    assert task.id not in ck_runner.mailboxes
+    assert task.id not in ck_runner._usage_flushed_at
+    assert await ck_runner.checkpointer.aget_tuple(
+        {"configurable": {"thread_id": task.id}}) is None
+
+
+async def test_timeout_fails_task_and_persists_spend(ck_runner, tmp_path, monkeypatch):
+    task = await _demo_task(ck_runner, tmp_path)
+    ck_runner.settings.task_timeout_seconds = 1
+    _wire_agent(monkeypatch,
+                lambda ws: HangingAgent(ws, checkpointer=ck_runner.checkpointer,
+                                        thread_id=task.id))
+
+    out = await ck_runner.run(task)
+
+    assert out.status == "failed"
+    assert out.error == "task timed out"
+    refreshed = await ck_runner.db.get_task(task.id)
+    assert refreshed.status == "failed" and refreshed.finished_at is not None
+    assert refreshed.input_tokens == 1000
+    events = await ck_runner.db.list_events(task.id)
+    assert any(e["kind"] == "status" and e["content"].get("status") == "failed"
+               for e in events)
+    assert await ck_runner.checkpointer.aget_tuple(
+        {"configurable": {"thread_id": task.id}}) is None
+
+
+async def test_crash_teardown_still_restamps_sandbox(plain_runner, tmp_path, monkeypatch):
+    import sde_deepagent.sandbox as sbx
+
+    task = await _demo_task(plain_runner, tmp_path)
+    plain_runner.settings.sandbox_default = True  # _demo_task turned it off
+    marks: list[str] = []
+    monkeypatch.setattr(sbx, "docker_available", lambda: True)
+    monkeypatch.setattr(sbx, "ensure_container",
+                        lambda *a, **k: ("sde-repo-demo", True))
+    monkeypatch.setattr(sbx, "mark_used", lambda name, path: marks.append(name))
+    _wire_agent(monkeypatch, lambda ws: ScriptedAgent(ws, [ValueError]))
+
+    out = await plain_runner.run(task)
+
+    assert out.status == "failed"
+    # idle clock restamped at task start AND in teardown, even for a crash —
+    # the reaper must count the container's 7-day TTL from this task's end
+    assert marks.count("sde-repo-demo") == 2
 
 
 async def test_worker_skips_notify_for_requeued_task(temp_env):
