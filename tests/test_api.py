@@ -16,12 +16,14 @@ async def client(temp_env):
                 yield client
 
 
-async def test_health(client):
+async def test_health_is_slim(client):
+    # /api/health is PUBLIC (no auth): it must not fingerprint the deployment
+    # (which providers/intakes are configured, whether auth is on, ...)
     r = await client.get("/api/health")
     assert r.status_code == 200
     body = r.json()
-    assert body["ok"] is True
-    assert "providers" in body
+    assert body["ok"] is True and "version" in body
+    assert set(body) == {"ok", "version"}
 
 
 async def test_repo_crud(client):
@@ -207,6 +209,15 @@ async def test_status_endpoint(client, monkeypatch):
     for c in comps.values():
         assert set(c) >= {"key", "label", "state", "detail"}
         assert c["state"] in {"ok", "warn", "down", "off", "unconfigured"}
+
+    # the config fingerprint that used to be on public /api/health lives here,
+    # behind auth
+    config = r.json()["config"]
+    assert set(config) >= {"providers", "github", "memory", "firecrawl",
+                           "require_approval", "auth", "sandbox_default",
+                           "review_polling", "intakes", "running"}
+    assert config["providers"] == {"anthropic": False, "google": False,
+                                   "openai": False}
 
 
 async def test_stats(client):

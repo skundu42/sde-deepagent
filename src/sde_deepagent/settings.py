@@ -79,7 +79,8 @@ class Settings(BaseSettings):
     data_dir: Path = Path("data")
     config_dir: Path = Path("config")
     context_dir: Path = Path("context")
-    ui_dir: Path = Path("ui")
+    # built web UI (React + shadcn); web/dist is committed so deploys need no Node
+    ui_dir: Path = Path("web/dist")
     max_concurrent_tasks: int = 2
     task_timeout_seconds: int = 3600
     recursion_limit: int = 1000
@@ -110,6 +111,20 @@ class Settings(BaseSettings):
     # --- LLM cost budgets (USD; 0 = unlimited) ---
     task_budget_usd: float = 0.0   # default per-task cap (overridable per task)
     daily_budget_usd: float = 0.0  # global cap; queue pauses when today's spend hits it
+    # persist an in-flight run's token spend to the DB this often, so a hard
+    # crash can't lose it from the daily total (0 = every model response)
+    usage_flush_seconds: float = 30.0
+
+    # --- chat code-reading reference clones ---
+    # re-fetch a ref clone when its last fetch is older than this (0 = never refresh)
+    ref_clone_ttl_minutes: float = 15.0
+    # remove ref clones not read for this many days (0 = keep forever)
+    ref_clone_retention_days: float = 14.0
+
+    # --- history retention (0 = keep forever) ---
+    # events of finished tasks and chat-spend rows older than this are pruned
+    # by a daily sweep; open tasks keep their traces regardless of age
+    retention_days: float = 90.0
 
     @property
     def db_path(self) -> Path:

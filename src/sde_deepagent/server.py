@@ -203,27 +203,11 @@ def create_app() -> FastAPI:
     # ---- health & stats ----
 
     @app.get("/api/health")
-    async def health(request: Request):
-        s = request.app.state.settings
-        return {
-            "ok": True,
-            "version": __version__,
-            "providers": {
-                "anthropic": bool(s.anthropic_api_key),
-                "google": bool(s.google_api_key),
-                "openai": bool(s.openai_api_key),
-            },
-            "github": bool(s.github_token),
-            "memory": bool(s.supermemory_base_url and s.supermemory_api_key),
-            "firecrawl": bool(s.firecrawl_url),
-            "require_approval": s.require_approval,
-            "auth": bool(s.auth_token),
-            "sandbox_default": s.sandbox_default,
-            "review_polling": s.github_review_polling and bool(s.github_token),
-            "intakes": [type(i).__name__.replace("Intake", "").lower()
-                        for i in request.app.state.intakes],
-            "running": len(request.app.state.worker.running),
-        }
+    async def health():
+        # public (no auth): keep it to a liveness bit. The deployment
+        # fingerprint (providers, auth on/off, intakes, ...) is on /api/status,
+        # which sits behind the auth middleware.
+        return {"ok": True, "version": __version__}
 
     @app.get("/api/status")
     async def status(request: Request):
@@ -252,11 +236,11 @@ def create_app() -> FastAPI:
         async def probe_sandbox():
             if not s.sandbox_default:
                 return comp("sandbox", "Sandbox (Docker)", "off",
-                            "sandbox disabled — task shells run on the host")
+                            "sandbox disabled: task shells run on the host")
             ok = await asyncio.to_thread(sandbox.docker_available)
             return comp("sandbox", "Sandbox (Docker)", "ok" if ok else "down",
                         "Docker daemon reachable" if ok
-                        else "Docker not running — tasks will fail at the sandbox step")
+                        else "Docker not running: tasks will fail at the sandbox step")
 
         async def probe_github():
             if not s.github_token:
@@ -282,7 +266,7 @@ def create_app() -> FastAPI:
             url = s.firecrawl_url
             if not url:
                 return comp("firecrawl", "Web scraper (Firecrawl)", "unconfigured",
-                            "not configured — the app fetches pages directly (optional)")
+                            "not configured: the app fetches pages directly (optional)")
             try:
                 async with httpx.AsyncClient(timeout=8) as c:
                     r = await c.get(url)
@@ -302,25 +286,38 @@ def create_app() -> FastAPI:
         configured = [k for k, v in provs.items() if v]
         providers_c = comp("providers", "Model providers", "ok" if configured else "down",
                            ("configured: " + ", ".join(configured)) if configured
-                           else "no model API key set — at least one is required")
+                           else "no model API key set: at least one is required")
 
         intakes = [type(i).__name__.replace("Intake", "").lower()
                    for i in request.app.state.intakes]
         intakes_c = comp("intakes", "Intake channels", "ok" if intakes else "off",
-                         ", ".join(intakes) if intakes else "none — web UI only")
+                         ", ".join(intakes) if intakes else "none: web UI only")
 
         auth_c = comp("auth", "API authentication", "ok" if s.auth_token else "warn",
                       "bearer token required" if s.auth_token
-                      else "disabled — anyone who can reach this port has full access")
+                      else "disabled: anyone who can reach this port has full access")
 
         w = request.app.state.worker
         worker_c = comp("worker", "Task queue", "warn" if w.budget_paused else "ok",
-                        "paused — daily budget reached" if w.budget_paused
+                        "paused: daily budget reached" if w.budget_paused
                         else f"{len(w.running)} running / max {w.max_concurrent}")
 
         return {"version": __version__,
                 "components": [providers_c, memory_c, sandbox_c, github_c,
-                               firecrawl_c, intakes_c, auth_c, worker_c]}
+                               firecrawl_c, intakes_c, auth_c, worker_c],
+                # deployment fingerprint (moved off the public /api/health)
+                "config": {
+                    "providers": {k: bool(v) for k, v in provs.items()},
+                    "github": bool(s.github_token),
+                    "memory": bool(s.supermemory_base_url and s.supermemory_api_key),
+                    "firecrawl": bool(s.firecrawl_url),
+                    "require_approval": s.require_approval,
+                    "auth": bool(s.auth_token),
+                    "sandbox_default": s.sandbox_default,
+                    "review_polling": s.github_review_polling and bool(s.github_token),
+                    "intakes": intakes,
+                    "running": len(w.running),
+                }}
 
     @app.get("/api/stats")
     async def stats(request: Request):
@@ -362,7 +359,7 @@ def create_app() -> FastAPI:
             if not parent:
                 raise HTTPException(404, f"parent task '{body.parent_id}' not found")
             if not parent.branch:
-                raise HTTPException(400, "parent task never produced a branch — "
+                raise HTTPException(400, "parent task never produced a branch: "
                                          "nothing to revise")
             repo = repo or parent.repo
         task = await request.app.state.db.create_task(
@@ -403,7 +400,7 @@ def create_app() -> FastAPI:
         the next time it checks for messages."""
         runner = request.app.state.worker.runner
         if not runner.steer(task_id, body.message):
-            raise HTTPException(409, "task is not running — steering only applies "
+            raise HTTPException(409, "task is not running: steering only applies "
                                      "to in-flight tasks")
         await request.app.state.db.add_event(task_id, "log",
                                              {"text": f"operator steer: {body.message}"})
@@ -431,7 +428,7 @@ def create_app() -> FastAPI:
         if not path.exists():
             path = legacy_workspace_root_for(s, task.repo, task.id) / "repo"
         if not path.exists():
-            raise HTTPException(409, "workspace no longer on disk — re-run the task")
+            raise HTTPException(409, "workspace no longer on disk: re-run the task")
         control_git_dir = control_git_dir_for(s, repo.name, task.id)
         if not control_git_dir.exists():
             control_git_dir = legacy_control_git_dir_for(s, repo.name, task.id)
@@ -440,7 +437,7 @@ def create_app() -> FastAPI:
             control_git_dir=control_git_dir,
         )
         if not ws.control_git_dir.exists():
-            raise HTTPException(409, "trusted Git metadata no longer on disk — re-run the task")
+            raise HTTPException(409, "trusted Git metadata no longer on disk: re-run the task")
         await push_branch(ws, s)
         events = await request.app.state.db.list_events(task.id)
         proposal = next((e["content"] for e in reversed(events)
@@ -573,7 +570,7 @@ def create_app() -> FastAPI:
         memory = request.app.state.memory
         if not memory:
             raise HTTPException(
-                503, "long-term memory is not configured — set SUPERMEMORY_BASE_URL "
+                503, "long-term memory is not configured: set SUPERMEMORY_BASE_URL "
                      "and SUPERMEMORY_API_KEY")
         return memory
 
@@ -621,8 +618,8 @@ def create_app() -> FastAPI:
                 raise HTTPException(503, f"cannot reach memory server at {memory.base_url}")
             if h["state"] == "unauthorized":
                 raise HTTPException(
-                    502, "memory server rejected the request — check SUPERMEMORY_API_KEY")
-            raise HTTPException(502, "memory server failed to store the resource — see server logs")
+                    502, "memory server rejected the request: check SUPERMEMORY_API_KEY")
+            raise HTTPException(502, "memory server failed to store the resource: see server logs")
         return {"id": doc_id, "scope": body.scope or "global",
                 "kind": "url" if is_url else "text", "title": title}
 

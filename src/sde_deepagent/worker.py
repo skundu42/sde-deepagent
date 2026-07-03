@@ -6,13 +6,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Awaitable, Callable
 
 from .db import Database, Task
 from .pricing import DailyBudget
 from .pricing import utc_midnight_ts as _utc_midnight_ts  # noqa: F401 — re-export for callers/tests
+from .repo_reader import prune_ref_clones
 from .runner import TaskRunner
 from .settings import Settings
+
+RETENTION_SWEEP_SECONDS = 86400  # once a day is plenty for 90-day retention
 
 logger = logging.getLogger(__name__)
 
@@ -37,22 +41,51 @@ class Worker:
         self.notifiers: list[Notifier] = []
         self._stop = asyncio.Event()
         self._dispatcher: asyncio.Task | None = None
+        self._sweeper: asyncio.Task | None = None
 
     def add_notifier(self, notifier: Notifier) -> None:
         self.notifiers.append(notifier)
 
     def start(self) -> None:
         self._dispatcher = asyncio.create_task(self._dispatch_loop(), name="worker-dispatcher")
+        self._sweeper = asyncio.create_task(self._retention_loop(), name="retention-sweeper")
 
     async def stop(self) -> None:
         self._stop.set()
         for t in list(self.running.values()):
             t.cancel()
         to_await = list(self.running.values())
-        if self._dispatcher:
-            self._dispatcher.cancel()
-            to_await.append(self._dispatcher)  # await it too, or stop() returns early
+        for background in (self._dispatcher, self._sweeper):
+            if background:
+                background.cancel()
+                to_await.append(background)  # await them too, or stop() returns early
         await asyncio.gather(*to_await, return_exceptions=True)
+
+    # ---- retention ----
+
+    async def _retention_loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                await self._run_retention_sweep()
+            except Exception:
+                logger.exception("retention sweep failed")
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=RETENTION_SWEEP_SECONDS)
+            except asyncio.TimeoutError:
+                pass
+
+    async def _run_retention_sweep(self) -> None:
+        """Daily bounded-growth sweep: old finished-task events and chat-spend
+        rows, plus reference clones the chat hasn't read in weeks."""
+        if self.settings is None:
+            return
+        if self.settings.retention_days > 0:
+            cutoff = time.time() - self.settings.retention_days * 86400
+            events, chats = await self.db.prune_history(cutoff)
+            if events or chats:
+                logger.info("retention: pruned %d old event(s), %d chat-spend row(s)",
+                            events, chats)
+        await asyncio.to_thread(prune_ref_clones, self.settings)
 
     def cancel_task(self, task_id: str) -> bool:
         t = self.running.get(task_id)
@@ -71,12 +104,12 @@ class Worker:
         if spend >= limit:
             if not self.budget_paused:
                 logger.warning(
-                    "daily budget reached ($%.2f of $%.2f) — pausing task pickup "
+                    "daily budget reached ($%.2f of $%.2f): pausing task pickup "
                     "until UTC midnight", spend, limit)
             self.budget_paused = True
             return False
         if self.budget_paused:
-            logger.info("daily budget headroom restored — resuming task pickup")
+            logger.info("daily budget headroom restored: resuming task pickup")
         self.budget_paused = False
         return True
 
@@ -101,6 +134,11 @@ class Worker:
         async def _run() -> None:
             try:
                 finished = await self.runner.run(task)
+                if finished.status == "queued":
+                    # parked by the daily cap — it will resume, so don't report
+                    # it to the source channel as if it had finished
+                    logger.info("task %s re-queued (daily budget reached)", task.id)
+                    return
                 for notify in self.notifiers:
                     try:
                         await notify(finished)

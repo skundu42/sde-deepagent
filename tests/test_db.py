@@ -176,3 +176,41 @@ async def test_requeue_preserves_started_at_so_cost_stays_counted(tmp_path):
     assert await db2.spend_since(0.0) == pytest.approx(0.5)  # cost still counted
     await db2.close()
     await db2.close()
+
+
+# ---- retention: events/chat_spend pruning ----
+
+
+async def test_prune_history_removes_old_finished_rows(temp_env):
+    import time as _time
+
+    from sde_deepagent.settings import get_settings
+
+    db = Database(get_settings().db_path)
+    await db.connect()
+    try:
+        old_done = await db.create_task("old done", "d")
+        old_open = await db.create_task("old open", "d")
+        fresh = await db.create_task("fresh", "d")
+        await db.update_task(old_done.id, status="completed")
+        await db.update_task(old_open.id, status="awaiting_approval")
+        for t in (old_done, old_open, fresh):
+            await db.add_event(t.id, "log", {"text": "hi"})
+        await db.add_chat_spend("s1", "m", 1, 1, 0.01)
+        await db.add_chat_spend("s2", "m", 1, 1, 0.01)
+
+        cutoff = _time.time() + 60  # everything is "old" relative to this
+        # backdate nothing: cutoff in the future makes all rows eligible,
+        # so what survives is purely down to task-status protection
+        ev, cs = await db.prune_history(cutoff)
+
+        assert cs == 2  # chat spend rows are always prunable past the cutoff
+        assert ev == 1  # ONLY the finished task's events went
+        assert await db.list_events(old_done.id) == []
+        assert len(await db.list_events(old_open.id)) == 1  # open task: kept
+        assert len(await db.list_events(fresh.id)) == 1     # queued: kept
+
+        # a cutoff in the past prunes nothing
+        assert await db.prune_history(_time.time() - 3600) == (0, 0)
+    finally:
+        await db.close()

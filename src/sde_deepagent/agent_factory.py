@@ -80,13 +80,13 @@ def make_pr_tool(
             result["pr_body"] = body
             return ("Approval mode: your work is committed locally and your PR "
                     "proposal is recorded. An operator will review the diff and "
-                    "ship it — do not retry, just finish up and summarize.")
+                    "ship it: do not retry, just finish up and summarize.")
         await push_branch(ws, settings)
         try:
             url = await create_pull_request(ws, settings, title, body)
         except GitError as e:
             return (f"Branch '{ws.branch}' was pushed, but no PR could be opened: {e}. "
-                    "Do not retry — finish up and report the branch name instead.")
+                    "Do not retry: finish up and report the branch name instead.")
         result["pr_url"] = url
         result["pr_title"] = title
         if on_event:
@@ -135,7 +135,7 @@ def make_run_tests_tool(
                     "secret-backed tests to run. If the project has tests, ask the "
                     "operator to register the test command for this codebase.")
         sel = _safe_selector(selector)
-        note = "\n(note: selector ignored — unsafe characters)" if (
+        note = "\n(note: selector ignored: unsafe characters)" if (
             selector and not sel) else ""
         cmd = f"{test_cmd} {sel}".strip() if sel else test_cmd
         if sandbox_container:
@@ -196,8 +196,8 @@ def make_memory_tools(memory: Memory, repo_name: str, task_id: str,
         mem_id = await memory.add(content, tag,
                                   metadata={"task_id": task_id, "repo": repo_name,
                                             "source": "agent"})
-        return f"Saved to {scope} memory." if mem_id else \
-            "Memory server unavailable — not saved, continue without it."
+        return f"Saved to {scope} memory." if mem_id else\
+            "Memory server unavailable: not saved, continue without it."
 
     return search_memory, save_memory
 
@@ -212,7 +212,7 @@ def make_check_messages_tool(drain: Callable[[], list[str]]):
         msgs = drain()
         if not msgs:
             return "No new operator messages."
-        return "Operator messages (incorporate these now):\n" + \
+        return "Operator messages (incorporate these now):\n" +\
             "\n".join(f"- {m}" for m in msgs)
 
     return check_messages
@@ -314,7 +314,7 @@ async def build_agent(
         repo_description=repo.description or "(no description registered)",
         default_branch=repo.default_branch,
         setup_cmd=repo.setup or "(none registered)",
-        test_cmd=repo.test or "(none registered — discover it from the repo)",
+        test_cmd=repo.test or "(none registered: discover it from the repo)",
         task_description=task_description,
         ship_instructions=SHIP_APPROVAL if effective_approval else SHIP_NORMAL,
         repo_map=build_repo_map(ws.path),

@@ -49,25 +49,25 @@ runs tests, and opens a PR.
 
 Answer the operator's questions grounded in everything the system knows, using
 your tools:
-- search_knowledge — answer content questions from ingested resources (websites,
+- search_knowledge: answer content questions from ingested resources (websites,
   docs and pasted text added on the Resources page) AND the learnings the agents
   recorded about codebases. Use this whenever asked what a resource or doc says.
-- list_resources — see what resources have been ingested (title, source URL,
+- list_resources: see what resources have been ingested (title, source URL,
   scope, and indexing status).
-- list_repos / get_repo — the registered codebases (description, branch, setup
+- list_repos / get_repo: the registered codebases (description, branch, setup
   and test commands, context docs).
-- list_repo_files / grep_repo / read_repo_file — read the ACTUAL source of a
+- list_repo_files / grep_repo / read_repo_file: read the ACTUAL source of a
   registered codebase OR any GitHub repo added on the Resources page. Use these to
   answer code-level questions ("what does X do", "where is Y defined", "how is Z
   implemented") from the real files instead of guessing or relying on the README.
   Typical flow: grep_repo or list_repo_files to locate the file, then read_repo_file.
-- list_tasks / get_task / get_task_trace — task records and step-by-step traces.
+- list_tasks / get_task / get_task_trace: task records and step-by-step traces.
 
-When a question is about how code works, READ THE SOURCE with the repo tools —
+When a question is about how code works, READ THE SOURCE with the repo tools -
 search_knowledge only has summaries, not the code. The `repo` argument is a
 registered codebase name or a GitHub URL/owner-repo shown by list_resources.
 
-Ground every claim in tool results — never invent details. Cite sources: a file
+Ground every claim in tool results: never invent details. Cite sources: a file
 path you read, a resource's title or URL, or a task id like `69e1b9e5ca`. If
 search_knowledge finds nothing and list_resources shows a matching resource still
 `queued`, tell the user it is still being indexed rather than that it doesn't
@@ -279,7 +279,7 @@ def make_chat_tools(db: Database, settings: Settings, cfg: ConfigStore,
             results = await memory.search(query, tags, limit=8)
             if not results:
                 return ("No matching knowledge found. If a resource was just added it "
-                        "may still be indexing — check list_resources for its status.")
+                        "may still be indexing: check list_resources for its status.")
             return "\n".join(f"- [{r['container']}] {r['memory']}" for r in results)
 
         @tool

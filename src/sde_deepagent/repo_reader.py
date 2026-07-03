@@ -12,7 +12,9 @@ private GitHub repos work with GITHUB_TOKEN, while public repos need no token.""
 from __future__ import annotations
 
 import asyncio
+import logging
 import shutil
+import time
 from pathlib import Path
 
 from .config import repo_slug
@@ -26,7 +28,13 @@ from .gitops import (
 )
 from .settings import Settings
 
+logger = logging.getLogger(__name__)
+
 DEFAULT_MAX_FILE_BYTES = 40_000
+
+# Stamp files live under .git/ so git ls-files / grep never see them.
+FETCH_STAMP = "sde-fetch-stamp"  # mtime = last successful (or attempted) fetch
+USE_STAMP = "sde-use-stamp"      # mtime = last read; drives retention pruning
 
 
 class RepoReader:
@@ -47,21 +55,61 @@ class RepoReader:
     def _lock(self, path: Path) -> asyncio.Lock:
         return self._locks.setdefault(str(path), asyncio.Lock())
 
+    @staticmethod
+    def _touch_stamp(clone_dir: Path, name: str) -> None:
+        try:
+            (clone_dir / ".git" / name).touch()
+        except OSError:  # a missing/readonly .git must not fail a read
+            logger.warning("could not touch %s in %s", name, clone_dir)
+
+    def _auth(self, url: str) -> dict[str, str]:
+        return _git_env(auth_env(url, self.settings.github_token,
+                                 trusted_github_hosts(self.settings)))
+
+    async def _refresh_if_stale(self, url: str, clone_dir: Path) -> None:
+        """Fetch + hard-reset when the clone's last fetch is older than the TTL,
+        so reads track the remote instead of the first-clone snapshot. A failed
+        fetch (remote down, repo gone) logs and serves the stale clone: old
+        source beats no answer, and the stamp is still advanced so an
+        unreachable remote isn't re-probed on every single read."""
+        ttl = self.settings.ref_clone_ttl_minutes * 60
+        if ttl <= 0:
+            return
+        stamp = clone_dir / ".git" / FETCH_STAMP
+        try:
+            age = time.time() - stamp.stat().st_mtime
+        except OSError:
+            age = float("inf")
+        if age < ttl:
+            return
+        code, out = await run_cmd(["git", "fetch", "--depth", "1", "origin"],
+                                  cwd=clone_dir, timeout=180, env=self._auth(url))
+        if code == 0:
+            code, out = await run_cmd(["git", "reset", "--hard", "@{upstream}"],
+                                      cwd=clone_dir, timeout=60, env=_git_env())
+        if code != 0:
+            logger.warning("ref-clone refresh of %s failed, serving stale copy: %s",
+                           url, out[-300:])
+        self._touch_stamp(clone_dir, FETCH_STAMP)
+
     async def ensure_clone(self, url: str) -> Path:
-        """Return a path to a shallow clone of `url`, cloning on first use."""
+        """Return a path to a shallow clone of `url`, cloning on first use and
+        refreshing an existing clone once its fetch TTL has expired."""
         clone_dir = self._clone_dir(url)
         async with self._lock(clone_dir):
             if (clone_dir / ".git").is_dir():
+                await self._refresh_if_stale(url, clone_dir)
+                self._touch_stamp(clone_dir, USE_STAMP)
                 return clone_dir
             clone_dir.parent.mkdir(parents=True, exist_ok=True)
-            env = _git_env(auth_env(url, self.settings.github_token,
-                                    trusted_github_hosts(self.settings)))
             code, out = await run_cmd(
                 ["git", "clone", "--depth", "1", "--single-branch", url, str(clone_dir)],
-                timeout=300, env=env)
+                timeout=300, env=self._auth(url))
             if code != 0:
                 shutil.rmtree(clone_dir, ignore_errors=True)  # no half-clone behind
                 raise GitError(f"clone of {url} failed:\n{out[-600:]}")
+            self._touch_stamp(clone_dir, FETCH_STAMP)
+            self._touch_stamp(clone_dir, USE_STAMP)
             return clone_dir
 
     async def list_files(self, url: str, subdir: str = "", limit: int = 300) -> list[str]:
@@ -102,3 +150,29 @@ class RepoReader:
         if code not in (0, 1):  # git grep exits 1 on "no matches", which isn't an error
             raise GitError(out[-400:] or "git grep failed")
         return [ln for ln in out.splitlines() if ln.strip()][:limit]
+
+
+def prune_ref_clones(settings: Settings) -> list[str]:
+    """Remove reference clones not read for REF_CLONE_RETENTION_DAYS (their
+    use stamp drives this; a stampless dir counts as stale). Sync — call via
+    asyncio.to_thread. Returns the removed directory names."""
+    retention = settings.ref_clone_retention_days * 86400
+    if retention <= 0 or not settings.ref_clones_dir.is_dir():
+        return []
+    removed: list[str] = []
+    cutoff = time.time() - retention
+    for clone in settings.ref_clones_dir.iterdir():
+        if not (clone / ".git").is_dir():
+            continue
+        stamp = clone / ".git" / USE_STAMP
+        try:
+            last_used = stamp.stat().st_mtime
+        except OSError:
+            last_used = 0.0
+        if last_used < cutoff:
+            shutil.rmtree(clone, ignore_errors=True)
+            removed.append(clone.name)
+    if removed:
+        logger.info("pruned %d unused ref clone(s): %s",
+                    len(removed), ", ".join(removed))
+    return removed

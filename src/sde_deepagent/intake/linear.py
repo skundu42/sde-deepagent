@@ -96,7 +96,7 @@ class LinearIntake:
             logger.info("linear intake started (webhook-only, label '%s'%s)",
                         self.settings.linear_label,
                         "" if self.settings.linear_oauth_token
-                        else "; write-back disabled — no LINEAR_OAUTH_TOKEN")
+                        else "; write-back disabled: no LINEAR_OAUTH_TOKEN")
 
     async def stop(self) -> None:
         if self._task:

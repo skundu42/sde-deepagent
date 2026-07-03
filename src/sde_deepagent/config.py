@@ -125,7 +125,7 @@ subagents:
 #     args: ["/opt/tools/server.py"]
 mcp_servers: {}
 
-# Pricing overrides in USD per million tokens — built-in prices for current
+# Pricing overrides in USD per million tokens: built-in prices for current
 # Claude/Gemini models are bundled, add or correct entries here when they drift.
 # pricing:
 #   claude-sonnet-4-6: {input: 3.0, output: 15.0}

@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from dataclasses import dataclass, field
 from typing import Any
 
 from .agent_factory import _shell_env, build_agent
@@ -36,6 +37,57 @@ logger = logging.getLogger(__name__)
 TRUNCATE_ARGS = 1500
 TRUNCATE_RESULT = 2500
 
+# Backoff schedule for retrying transient provider failures (tests patch this).
+TRANSIENT_BACKOFF_SECONDS: tuple[int, ...] = (2, 8, 30)
+
+# Exception class names that mean "the provider/transport hiccuped" across the
+# three SDK families (openai/anthropic share shapes; google + httpx below).
+# Matched by name so this module imports none of them.
+_TRANSIENT_ERROR_NAMES = frozenset({
+    "APIConnectionError", "APITimeoutError", "InternalServerError",
+    "ServiceUnavailableError", "OverloadedError", "RateLimitError",
+    "ResourceExhausted", "ServerError", "DeadlineExceeded", "TooManyRequests",
+    "ConnectError", "ConnectTimeout", "ReadTimeout", "WriteTimeout",
+    "PoolTimeout", "ReadError", "WriteError", "RemoteProtocolError",
+    "TransportError", "NetworkError",
+})
+
+
+def is_transient_llm_error(exc: BaseException) -> bool:
+    """True for failures worth retrying: transport/connection problems and
+    provider 429/5xx responses. Detected via `status_code` duck-typing plus
+    class names, and the __cause__/__context__ chain is walked because SDKs
+    wrap the underlying transport error."""
+    seen: set[int] = set()
+    stack: list[BaseException] = [exc]
+    while stack:
+        e = stack.pop()
+        if id(e) in seen:
+            continue
+        seen.add(id(e))
+        status = getattr(e, "status_code", None)
+        if isinstance(status, int):
+            if status == 429 or status >= 500:
+                return True
+        elif isinstance(e, (ConnectionError, TimeoutError)):
+            return True
+        elif type(e).__name__ in _TRANSIENT_ERROR_NAMES:
+            return True
+        for nxt in (e.__cause__, e.__context__):
+            if nxt is not None:
+                stack.append(nxt)
+    return False
+
+
+@dataclass
+class _StreamState:
+    """Cross-attempt stream bookkeeping: retries continue the same run, so
+    subagent attribution and message dedup must survive a re-entry."""
+
+    call_map: dict[str, str] = field(default_factory=dict)  # tool_call_id -> subagent
+    active: dict[str, str] = field(default_factory=dict)    # in-flight delegations
+    seen: set[str] = field(default_factory=set)             # emitted message ids
+
 
 class TaskRunner:
     def __init__(self, db: Database, bus: EventBus, cfg: ConfigStore, settings: Settings,
@@ -44,6 +96,7 @@ class TaskRunner:
                  checkpointer: Any = None):
         self.mailboxes: dict[str, list[str]] = {}  # task_id -> pending operator messages
         self._redactors: dict[str, Redactor] = {}  # task_id -> secret-value redactor
+        self._usage_flushed_at: dict[str, float] = {}  # task_id -> last mid-run flush
         self.db = db
         self.bus = bus
         self.cfg = cfg
@@ -77,7 +130,7 @@ class TaskRunner:
     async def resolve_repo(self, task: Task) -> RepoConfig:
         repos = self.cfg.repos()
         if not repos:
-            raise GitError("no codebases registered — add one in the UI or config/repos.yaml")
+            raise GitError("no codebases registered: add one in the UI or config/repos.yaml")
         if task.repo:
             if task.repo not in repos:
                 raise GitError(
@@ -135,13 +188,48 @@ class TaskRunner:
         names = set(active.values())
         return names.pop() if len(names) == 1 else "subagent"
 
+    async def _stream_with_retries(self, task: Task, built, tracker: CostTracker,
+                                   budget_usd: float, resume: bool) -> str:
+        """Run the agent stream, retrying transient provider failures with
+        backoff. A retry resumes the checkpointed thread, so completed steps
+        are not re-billed; without a checkpointer, replaying from scratch WOULD
+        re-bill, so the error propagates immediately instead."""
+        state = _StreamState()
+        attempt = 0
+        while True:
+            try:
+                return await self._consume_stream(task, built, tracker, budget_usd,
+                                                  resume=resume, state=state)
+            except BudgetExceeded:
+                raise  # budget stops are deliberate, never retried
+            except Exception as e:  # noqa: BLE001 — classified right below
+                if (self.checkpointer is None
+                        or attempt >= len(TRANSIENT_BACKOFF_SECONDS)
+                        or not is_transient_llm_error(e)):
+                    raise
+                delay = TRANSIENT_BACKOFF_SECONDS[attempt]
+                attempt += 1
+                logger.warning("task %s: transient provider error, retry %d/%d in %ss: %s",
+                               task.id, attempt, len(TRANSIENT_BACKOFF_SECONDS), delay, e)
+                await self.emit(task.id, "log", {
+                    "text": f"transient provider error ({type(e).__name__}): retrying "
+                            f"in {delay}s (attempt {attempt} of "
+                            f"{len(TRANSIENT_BACKOFF_SECONDS)})"})
+                await asyncio.sleep(delay)
+                # resume the thread if any progress was checkpointed; a failure
+                # before the first checkpoint reseeds from the start
+                resume = await self.checkpointer.aget_tuple(
+                    {"configurable": {"thread_id": task.id}}) is not None
+
     async def _consume_stream(self, task: Task, built, tracker: CostTracker,
-                              budget_usd: float, resume: bool = False) -> str:
+                              budget_usd: float, resume: bool = False,
+                              state: _StreamState | None = None) -> str:
         """Stream the agent run, persisting events. Returns the final text."""
-        call_map: dict[str, str] = {}  # tool_call_id -> subagent name
-        active: dict[str, str] = {}    # task calls currently in flight
+        state = state or _StreamState()
+        call_map = state.call_map  # tool_call_id -> subagent name
+        active = state.active      # task calls currently in flight
         final_text = ""
-        seen_message_ids: set[str] = set()
+        seen_message_ids = state.seen
 
         config: dict[str, Any] = {"recursion_limit": self.settings.recursion_limit}
         if self.checkpointer is not None:
@@ -199,11 +287,12 @@ class TaskRunner:
                 if tracker.unpriced_models and not tracker.unpriced_warned:
                     tracker.unpriced_warned = True
                     await self.emit(task.id, "log", {
-                        "text": "model(s) not in the price table — billed at the "
+                        "text": "model(s) not in the price table: billed at the "
                                 "priciest known rate as a budget fail-safe: "
                                 + ", ".join(sorted(tracker.unpriced_models))
                                 + " (add a pricing: override in agents.yaml for "
                                 "accurate cost)"})
+                await self._maybe_flush_usage(task, tracker)
                 await self._enforce_budget(task, tracker, budget_usd)
                 await self._enforce_daily_budget()
             text = self._text_of(msg)
@@ -252,6 +341,16 @@ class TaskRunner:
         if spent >= limit:
             raise DailyBudgetExceeded(spent, limit)
 
+    async def _maybe_flush_usage(self, task: Task, tracker: CostTracker) -> None:
+        """Persist usage mid-run on an interval, so a hard crash cannot lose
+        the in-flight spend from the daily-budget total and a resumed run's
+        per-task budget carries forward from what was actually spent."""
+        last = self._usage_flushed_at.get(task.id)
+        now = time.monotonic()
+        if last is None or now - last >= self.settings.usage_flush_seconds:
+            self._usage_flushed_at[task.id] = now
+            await self._persist_usage(task, tracker)
+
     async def _persist_usage(self, task: Task, tracker: CostTracker | None) -> None:
         if tracker is None:
             return
@@ -286,7 +385,7 @@ class TaskRunner:
             await self.emit(task.id, "log", {"text": "changes left unshipped (auto_finalize off)"})
             return None
         await self.emit(task.id, "log",
-                        {"text": "agent left work without a PR — auto-finalizing"})
+                        {"text": "agent left work without a PR: auto-finalizing"})
         if dirty:
             await commit_all(ws, self._redact(task.id, f"feat: {task.title[:70]}"))
         await push_branch(ws, self.settings)
@@ -344,9 +443,13 @@ class TaskRunner:
         return True
 
     async def _protected_workspaces(self) -> set[str]:
-        """Workspaces holding unpushed approved-pending work must survive pruning."""
+        """Workspaces holding unpushed approved-pending work must survive
+        pruning — as must the clone of a re-queued task (budget-parked or
+        interrupted by a restart; a queued task with a branch is one that
+        already ran and intends to resume)."""
         waiting = await self.db.list_tasks(status="awaiting_approval", limit=500)
-        return {t.id for t in waiting}
+        parked = await self.db.list_tasks(status="queued", limit=500)
+        return {t.id for t in waiting} | {t.id for t in parked if t.branch}
 
     def steer(self, task_id: str, message: str) -> bool:
         """Queue an operator message for a running task; delivered when the
@@ -375,12 +478,15 @@ class TaskRunner:
     # ---- entry point ----
 
     async def run(self, task: Task) -> Task:
+        # error=None clears the leftover reason on a re-run of a previously
+        # parked/failed task, so a later success doesn't show a stale error
         await self.db.update_task(task.id, status="running",
-                                  started_at=time.time())
+                                  started_at=time.time(), error=None)
         await self.emit(task.id, "status", {"status": "running"})
         built = None
         tracker: CostTracker | None = None
         sandboxed = False
+        keep_checkpoint = False  # set by the daily-cap park, which resumes later
         self.mailboxes[task.id] = []
         try:
             parent: Task | None = None
@@ -408,7 +514,7 @@ class TaskRunner:
                                 or not self.secret_store.available):
                 await self.emit(task.id, "log", {
                     "text": "this repo has stored secrets but SECRETS_KEY is not "
-                            "configured — they are unavailable; set SECRETS_KEY to "
+                            "configured: they are unavailable; set SECRETS_KEY to "
                             "enable them"})
             if missing_secrets:
                 await self.emit(task.id, "log", {
@@ -450,7 +556,7 @@ class TaskRunner:
                 from . import sandbox as sbx
                 if not sbx.docker_available():
                     raise GitError(
-                        "tasks run sandboxed but Docker is unavailable — refusing "
+                        "tasks run sandboxed but Docker is unavailable: refusing "
                         "to run untrusted commands on the host. Install/start Docker, "
                         "or opt out (SANDBOX_DEFAULT=false, or sandbox: false on "
                         "this repo) to run on the host.")
@@ -505,7 +611,7 @@ class TaskRunner:
                                 {"name": "setup", "output": out[-2000:], "exit_code": code})
                 if code != 0:
                     await self.emit(task.id, "log",
-                                    {"text": "setup failed — continuing, agent may retry"})
+                                    {"text": "setup failed: continuing, agent may retry"})
 
             agents_cfg = self.cfg.agents()
             tracker = CostTracker(
@@ -522,6 +628,7 @@ class TaskRunner:
             # count this task's spend toward the daily cap while it runs, before
             # its cost is persisted at the end of the run
             self.daily_budget.track(task.id, tracker)
+            self._usage_flushed_at[task.id] = time.monotonic()
             budget = task.budget_usd or self.settings.task_budget_usd
 
             async def on_tool_event(kind: str, content: dict) -> None:
@@ -553,7 +660,7 @@ class TaskRunner:
                         + (", sandboxed" if sandboxed else "") + ")"})
 
             final_text = await asyncio.wait_for(
-                self._consume_stream(task, built, tracker, budget, resume=resume),
+                self._stream_with_retries(task, built, tracker, budget, resume=resume),
                 timeout=self.settings.task_timeout_seconds,
             )
 
@@ -581,6 +688,22 @@ class TaskRunner:
             task.status = "cancelled"
             await self.emit(task.id, "status", {"status": "cancelled"})
             raise
+        except DailyBudgetExceeded as e:
+            # the account-wide cap pausing the queue is not this task's failure:
+            # park it back in the queue and keep its checkpoint so the
+            # post-midnight dispatch resumes it from where it stopped.
+            # (Revision threads are never resumed, so theirs is still dropped.)
+            await self._persist_usage(task, tracker)
+            keep_checkpoint = self.checkpointer is not None and not task.parent_id
+            task.status, task.error = "queued", self._redact(task.id, str(e))
+            await self.db.update_task(task.id, status="queued", error=task.error)
+            await self.emit(task.id, "status", {
+                "status": "queued", "reason": "daily_budget",
+                "usage": tracker.summary() if tracker else None,
+            })
+            await self.emit(task.id, "log", {
+                "text": "daily budget reached: task parked, it will resume "
+                        "automatically after the UTC midnight budget reset"})
         except BudgetExceeded as e:
             await self._persist_usage(task, tracker)
             task.status, task.error = "failed", self._redact(task.id, str(e))
@@ -607,12 +730,14 @@ class TaskRunner:
         finally:
             self.mailboxes.pop(task.id, None)
             self._redactors.pop(task.id, None)
+            self._usage_flushed_at.pop(task.id, None)
             self.daily_budget.untrack(task.id)  # cost is now persisted in the DB
             # reaching finally means the run ended (completed/failed/cancelled/
             # awaiting_approval) — a checkpoint is only needed to resume a run the
-            # process *died* inside (where finally never runs), so drop it here to
-            # keep checkpoints.sqlite bounded
-            if self.checkpointer is not None:
+            # process *died* inside (where finally never runs) or one parked by
+            # the daily cap (keep_checkpoint), so drop it otherwise to keep
+            # checkpoints.sqlite bounded
+            if self.checkpointer is not None and not keep_checkpoint:
                 try:
                     await self.checkpointer.adelete_thread(task.id)
                 except Exception:  # noqa: BLE001 — cleanup must not mask the outcome

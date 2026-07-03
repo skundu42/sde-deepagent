@@ -1,0 +1,115 @@
+name: Release
+
+# Two paths into this workflow:
+#   push to main      -> publish ghcr.io/<repo>:edge   (rolling dev image)
+#   push tag vX.Y.Z   -> publish ghcr.io/<repo>:X.Y.Z, :X.Y, :latest
+#                        and create the GitHub release with generated notes
+on:
+  push:
+    branches: [main]
+    tags: ["v*.*.*"]
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  verify:
+    # publishing is gated on the same checks CI runs; a broken tag never ships
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Sync dependencies
+        run: uv sync --frozen
+      - name: Lint
+        run: uv run ruff check src tests
+      - name: Test
+        run: uv run pytest -q
+      - name: Tag matches project version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version="$(grep -m1 '^version' pyproject.toml | sed 's/.*"\(.*\)".*/\1/')"
+          if [ "$tag" != "$version" ]; then
+            echo "::error::tag v$tag does not match pyproject.toml version $version"
+            exit 1
+          fi
+
+  publish:
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v5
+      - name: Set up QEMU (arm64 builds)
+        uses: docker/setup-qemu-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Image tags and labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=edge,branch=main
+      - name: Build and push (amd64 + arm64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: false
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  github-release:
+    needs: publish
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - name: Release notes from CHANGELOG.md
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          # everything under "## [X.Y.Z]" up to the next "## [" header
+          awk -v ver="$version" '
+            $0 ~ "^## \\[" ver "\\]" { flag = 1; next }
+            /^## \[/ { flag = 0 }
+            flag' CHANGELOG.md > release-body.md
+          if ! [ -s release-body.md ]; then
+            echo "::warning::no CHANGELOG.md section for $version; using generated notes only"
+          fi
+          {
+            echo ""
+            echo "### Container image (linux/amd64 + linux/arm64)"
+            echo ""
+            echo '```'
+            echo "docker pull ${IMAGE}:${GITHUB_REF_NAME#v}"
+            echo '```'
+            echo ""
+            echo "\`${IMAGE}:latest\` now points at this release. To pin"
+            echo "deployments, set \`SDE_IMAGE_TAG=${GITHUB_REF_NAME#v}\` in \`.env\`"
+            echo "(the compose file reads it)."
+          } >> release-body.md
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: release-body.md
+          generate_release_notes: true

@@ -11,7 +11,7 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
 COPY src ./src
-COPY ui ./ui
+COPY web/dist ./web/dist
 COPY LICENSE README.md ./
 RUN uv sync --frozen --no-dev
 

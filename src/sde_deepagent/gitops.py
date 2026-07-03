@@ -23,11 +23,20 @@ class GitError(RuntimeError):
     pass
 
 
+# Generous default: several callers parse git output (diffs, ls-tree)
+# programmatically, but the controller's memory must stay bounded even when a
+# child command prints gigabytes.
+MAX_CMD_OUTPUT_BYTES = 5_000_000
+
+
 async def run_cmd(
     args: list[str], cwd: Path | None = None, timeout: int = 300,
     env: dict[str, str] | None = None,
+    max_output_bytes: int = MAX_CMD_OUTPUT_BYTES,
 ) -> tuple[int, str]:
-    """Run a subprocess, return (returncode, combined output)."""
+    """Run a subprocess, return (returncode, combined output). Output is
+    drained incrementally and capped — never buffered whole — so a runaway
+    child cannot balloon the controller's memory."""
     proc = await asyncio.create_subprocess_exec(
         *args,
         cwd=str(cwd) if cwd else None,
@@ -35,12 +44,30 @@ async def run_cmd(
         stderr=asyncio.subprocess.STDOUT,
         env=env,
     )
+    kept = bytearray()
+    total = 0
+
+    async def _drain() -> None:
+        nonlocal total
+        while True:
+            chunk = await proc.stdout.read(65536)
+            if not chunk:
+                break
+            total += len(chunk)
+            if len(kept) < max_output_bytes:
+                kept.extend(chunk[: max_output_bytes - len(kept)])
+
     try:
-        out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        await asyncio.wait_for(asyncio.gather(_drain(), proc.wait()), timeout=timeout)
     except asyncio.TimeoutError:
         proc.kill()
+        await proc.wait()
         raise GitError(f"command timed out: {' '.join(args)}")
-    return proc.returncode or 0, out.decode(errors="replace")
+    out = kept.decode(errors="replace")
+    if total > max_output_bytes:
+        out += (f"\n... [output truncated at {max_output_bytes} bytes; "
+                f"the command printed {total}]")
+    return proc.returncode or 0, out
 
 
 async def git(args: list[str], cwd: Path, timeout: int = 300, check: bool = True,
@@ -323,21 +350,13 @@ async def push_branch(ws: Workspace, settings: Settings) -> None:
              f"refs/remotes/origin/{ws.branch}"],
     )).strip()
     lease = f"--force-with-lease=refs/heads/{ws.branch}:{expected}"
-    proc = await asyncio.create_subprocess_exec(
-        "git", f"--git-dir={ws.control_git_dir}", f"--work-tree={ws.path}",
-        "-c", f"core.hooksPath={os.devnull}",
-        "push", lease, ws.repo.url, f"HEAD:refs/heads/{ws.branch}",
-        cwd=str(ws.path), env=env,
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
-    )
-    try:
-        out, _ = await asyncio.wait_for(proc.communicate(), timeout=600)
-    except asyncio.TimeoutError:
-        proc.kill()
-        raise GitError("git push timed out")
-    if proc.returncode != 0:
-        raise GitError(f"git push failed ({proc.returncode}):\n"
-                       f"{out.decode(errors='replace')[-2000:]}")
+    code, out = await run_cmd(
+        ["git", f"--git-dir={ws.control_git_dir}", f"--work-tree={ws.path}",
+         "-c", f"core.hooksPath={os.devnull}",
+         "push", lease, ws.repo.url, f"HEAD:refs/heads/{ws.branch}"],
+        cwd=ws.path, timeout=600, env=env)
+    if code != 0:
+        raise GitError(f"git push failed ({code}):\n{out[-2000:]}")
     # A URL push does not reliably update origin/* tracking refs. Record the
     # successfully pushed commit so retries retain force-with-lease protection.
     await control_git(
@@ -360,7 +379,7 @@ async def create_pull_request(
             "GitHub-style remotes"
         )
     if not settings.github_token:
-        raise GitError("GITHUB_TOKEN is not set — cannot create a pull request")
+        raise GitError("GITHUB_TOKEN is not set: cannot create a pull request")
     host, owner, repo = parsed
     if host.lower() not in trusted_github_hosts(settings):
         raise GitError(

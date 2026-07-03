@@ -167,7 +167,7 @@ async def fetch_page_text(url: str, timeout: float = 30.0,
         try:
             return await firecrawl_scrape(url, firecrawl_url, firecrawl_key)
         except FetchError as e:
-            logger.warning("%s — falling back to built-in fetcher", e)
+            logger.warning("%s: falling back to built-in fetcher", e)
     try:
         async with httpx.AsyncClient(
             timeout=timeout, follow_redirects=False,

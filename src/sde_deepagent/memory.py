@@ -145,7 +145,7 @@ class Memory:
             return {"state": "ok", "detail": f"reachable at {self.base_url}"}
         if resp.status_code in (401, 403):
             return {"state": "unauthorized",
-                    "detail": "authentication rejected — check SUPERMEMORY_API_KEY"}
+                    "detail": "authentication rejected: check SUPERMEMORY_API_KEY"}
         return {"state": "error", "detail": f"HTTP {resp.status_code} from {self.base_url}"}
 
 

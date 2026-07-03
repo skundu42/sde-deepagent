@@ -275,6 +275,49 @@ class SandboxReaper:
 # ---- command execution ------------------------------------------------------
 
 
+def _run_capped(cmd: list[str], *, timeout: int, max_output_bytes: int,
+                env: dict[str, str] | None = None
+                ) -> tuple[int | None, bytes, bytes, bool]:
+    """Run a command, draining stdout/stderr incrementally and keeping at most
+    max_output_bytes+1 of each, so a child that prints gigabytes cannot balloon
+    the controller's memory (the extra byte lets callers detect overflow). The
+    pipes are drained to EOF regardless, so a capped child never deadlocks on a
+    full pipe. Returns (returncode, stdout, stderr, timed_out)."""
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            stdin=subprocess.DEVNULL, env=env)
+    buffers: dict[str, bytes] = {}
+
+    def _drain(stream_name: str, pipe) -> None:
+        cap = max_output_bytes + 1
+        kept = bytearray()
+        try:
+            while True:
+                chunk = pipe.read(65536)
+                if not chunk:
+                    break
+                if len(kept) < cap:
+                    kept.extend(chunk[: cap - len(kept)])
+        finally:
+            buffers[stream_name] = bytes(kept)
+
+    readers = [threading.Thread(target=_drain, args=(n, p), daemon=True)
+               for n, p in (("out", proc.stdout), ("err", proc.stderr))]
+    for t in readers:
+        t.start()
+    timed_out = False
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        # kills the local client process; an in-container command keeps running
+        # (known limitation — the container is reused, see module docstring)
+        timed_out = True
+        proc.kill()
+        proc.wait()
+    for t in readers:
+        t.join(timeout=10)
+    return proc.returncode, buffers.get("out", b""), buffers.get("err", b""), timed_out
+
+
 def exec_in_container(name: str, command: str, *, timeout: int,
                       workdir: str = "/workspaces",
                       max_output_bytes: int = 60000,
@@ -297,31 +340,32 @@ def exec_in_container(name: str, command: str, *, timeout: int,
         run_env = {**os.environ, **secrets}
     cmd += [name, "bash", "-lc", command]
     try:
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout,
-            stdin=subprocess.DEVNULL, env=run_env,
-        )
-    except subprocess.TimeoutExpired:
-        return ExecuteResponse(
-            output=f"Error: Command timed out after {timeout} seconds.",
-            exit_code=124, truncated=False)
+        code, out_bytes, err_bytes, timed_out = _run_capped(
+            cmd, timeout=timeout, max_output_bytes=max_output_bytes, env=run_env)
     except Exception as e:  # noqa: BLE001
         return ExecuteResponse(
             output=f"Error executing command in sandbox ({type(e).__name__}): {e}",
             exit_code=1, truncated=False)
+    if timed_out:
+        return ExecuteResponse(
+            output=f"Error: Command timed out after {timeout} seconds.",
+            exit_code=124, truncated=False)
 
+    stdout = out_bytes.decode(errors="replace")
+    stderr = err_bytes.decode(errors="replace")
     parts = []
-    if result.stdout:
-        parts.append(result.stdout)
-    if result.stderr:
-        parts.extend(f"[stderr] {ln}" for ln in result.stderr.strip().split("\n"))
+    if stdout:
+        parts.append(stdout)
+    if stderr:
+        parts.extend(f"[stderr] {ln}" for ln in stderr.strip().split("\n"))
     output = "\n".join(parts) if parts else "<no output>"
     truncated = len(output) > max_output_bytes
     if truncated:
         output = output[:max_output_bytes] + f"\n\n... Output truncated at {max_output_bytes} bytes."
-    if result.returncode != 0:
-        output = f"{output.rstrip()}\n\nExit code: {result.returncode}"
-    return ExecuteResponse(output=output, exit_code=result.returncode, truncated=truncated)
+    returncode = code if code is not None else 1
+    if returncode != 0:
+        output = f"{output.rstrip()}\n\nExit code: {returncode}"
+    return ExecuteResponse(output=output, exit_code=returncode, truncated=truncated)
 
 
 Redact = Callable[[str], str]

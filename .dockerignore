@@ -10,3 +10,4 @@ dist/
 *.egg-info/
 tests/
 /tmp/
+web/node_modules/

@@ -128,7 +128,7 @@ class SlackIntake:
             reply = res.get("reply") or "(no reply)"
         except Exception:  # noqa: BLE001 — a chat error must not drop the socket listener
             logger.exception("slack /ask failed in %s", channel)
-            reply = "Sorry — I couldn't answer that right now."
+            reply = "Sorry: I couldn't answer that right now."
         await post(reply)
 
     async def notify(self, task: Task) -> None:

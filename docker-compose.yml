@@ -1,5 +1,12 @@
 services:
   devagent:
+    # Published multi-arch image (amd64 + arm64), built by the Release
+    # workflow. `docker compose up -d` pulls it; pin a version with
+    # SDE_IMAGE_TAG=0.3.0 in .env, or build from source with
+    # `docker compose up -d --build` (pull_policy: missing keeps plain `up`
+    # from rebuilding when the image is already present).
+    image: ghcr.io/skundu42/sde-deepagent:${SDE_IMAGE_TAG:-latest}
+    pull_policy: missing
     build: .
     ports:
       - "127.0.0.1:8321:8321"

@@ -21,6 +21,27 @@ jobs:
       - name: Test
         run: uv run pytest -q
 
+  web:
+    # the built UI (web/dist) is committed so deploys stay Node-free; this job
+    # catches a broken or out-of-date build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install
+        run: npm ci
+      - name: Test
+        run: npx vitest run
+      - name: Build
+        run: npm run build
+
   docker:
     runs-on: ubuntu-latest
     steps:

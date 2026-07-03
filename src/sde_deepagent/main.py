@@ -24,7 +24,7 @@ def main() -> None:
                 settings.openai_api_key]):
         logging.warning(
             "No model API key configured! Set ANTHROPIC_API_KEY, GOOGLE_API_KEY "
-            "and/or OPENAI_API_KEY in .env — tasks will fail until you do."
+            "and/or OPENAI_API_KEY in .env: tasks will fail until you do."
         )
     uvicorn.run("sde_deepagent.main:app", host=settings.host, port=settings.port, log_level="info")
 
