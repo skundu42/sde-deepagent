@@ -109,9 +109,9 @@ def test_exec_in_container_passes_secrets_by_reference(monkeypatch):
     def fake_run(args, **kw):
         captured["args"] = args
         captured["env"] = kw.get("env")
-        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+        return 0, b"ok", b"", False
 
-    monkeypatch.setattr(sandbox.subprocess, "run", fake_run)
+    monkeypatch.setattr(sandbox, "_run_capped", fake_run)
     sandbox.exec_in_container("c", "pytest", timeout=30,
                               secrets={"DB": "sekretvalue"})
     args = captured["args"]
@@ -122,9 +122,9 @@ def test_exec_in_container_passes_secrets_by_reference(monkeypatch):
 
 def test_exec_in_container_no_env_flags_without_secrets(monkeypatch):
     captured = {}
-    monkeypatch.setattr(sandbox.subprocess, "run",
+    monkeypatch.setattr(sandbox, "_run_capped",
                         lambda a, **k: captured.update(args=a, env=k.get("env"))
-                        or SimpleNamespace(returncode=0, stdout="ok", stderr=""))
+                        or (0, b"ok", b"", False))
     sandbox.exec_in_container("c", "echo hi", timeout=10)
     assert "--env" not in captured["args"]
     assert captured["env"] is None  # untouched default environment

@@ -4,7 +4,6 @@ into the container. Docker itself is mocked here; a live container lifecycle
 check runs separately."""
 
 import json
-import subprocess
 import time
 from types import SimpleNamespace
 
@@ -27,9 +26,9 @@ def test_exec_in_container_builds_docker_exec(monkeypatch):
 
     def fake_run(args, **kw):
         captured["args"] = args
-        return SimpleNamespace(returncode=0, stdout="hello\n", stderr="")
+        return 0, b"hello\n", b"", False
 
-    monkeypatch.setattr(sandbox.subprocess, "run", fake_run)
+    monkeypatch.setattr(sandbox, "_run_capped", fake_run)
     res = sandbox.exec_in_container("sde-repo-x", "echo hello", timeout=30,
                                     workdir="/workspaces/t1/repo")
     assert captured["args"][:5] == ["docker", "exec", "-w",
@@ -40,21 +39,58 @@ def test_exec_in_container_builds_docker_exec(monkeypatch):
 
 
 def test_exec_in_container_merges_stderr_and_exit_code(monkeypatch):
-    monkeypatch.setattr(sandbox.subprocess, "run",
-                        lambda a, **k: SimpleNamespace(returncode=2, stdout="out",
-                                                       stderr="boom"))
+    monkeypatch.setattr(sandbox, "_run_capped",
+                        lambda a, **k: (2, b"out", b"boom", False))
     res = sandbox.exec_in_container("c", "false", timeout=10)
     assert res.exit_code == 2
     assert "[stderr] boom" in res.output and "Exit code: 2" in res.output
 
 
 def test_exec_in_container_timeout(monkeypatch):
-    def boom(*a, **k):
-        raise subprocess.TimeoutExpired(cmd="x", timeout=5)
-
-    monkeypatch.setattr(sandbox.subprocess, "run", boom)
+    monkeypatch.setattr(sandbox, "_run_capped",
+                        lambda a, **k: (None, b"", b"", True))
     res = sandbox.exec_in_container("c", "sleep 100", timeout=5)
     assert res.exit_code == 124 and "timed out" in res.output
+
+
+def test_exec_in_container_truncates_past_cap(monkeypatch):
+    monkeypatch.setattr(sandbox, "_run_capped",
+                        lambda a, **k: (0, b"a" * 70_000, b"", False))
+    res = sandbox.exec_in_container("c", "cat big", timeout=10)
+    assert res.truncated
+    assert "truncated at 60000 bytes" in res.output
+    assert len(res.output) < 70_000
+
+
+# ---- _run_capped: real subprocesses, bounded memory ----
+
+
+def test_run_capped_keeps_at_most_cap_bytes():
+    # child prints 2 MB; we keep at most cap+1 bytes of it and still drain to
+    # EOF (an un-drained pipe would deadlock the child instead of exiting 0)
+    code, out, err, timed_out = sandbox._run_capped(
+        ["bash", "-c", "yes x | head -c 2000000"],
+        timeout=60, max_output_bytes=10_000)
+    assert code == 0 and not timed_out
+    assert len(out) == 10_001  # cap + 1, the overflow sentinel
+    assert err == b""
+
+
+def test_run_capped_small_output_intact():
+    code, out, err, timed_out = sandbox._run_capped(
+        ["bash", "-c", "echo hi; echo oops >&2"],
+        timeout=30, max_output_bytes=10_000)
+    assert code == 0 and not timed_out
+    assert out == b"hi\n" and err == b"oops\n"
+
+
+def test_run_capped_timeout_kills_client():
+    import time
+    t0 = time.monotonic()
+    code, out, err, timed_out = sandbox._run_capped(
+        ["bash", "-c", "sleep 30"], timeout=1, max_output_bytes=1000)
+    assert timed_out
+    assert time.monotonic() - t0 < 10
 
 
 def test_docker_shell_backend_routes_execute(tmp_path, monkeypatch):

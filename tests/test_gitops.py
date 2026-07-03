@@ -304,3 +304,19 @@ def test_controller_git_env_excludes_provider_secrets(temp_env, monkeypatch):
     env = _git_env()
     assert "OPENAI_API_KEY" not in env
     assert "GITHUB_TOKEN" not in env
+
+
+# ---- run_cmd output cap: controller memory stays bounded ----
+
+
+async def test_run_cmd_caps_runaway_output():
+    code, out = await run_cmd(
+        ["bash", "-c", "yes x | head -c 3000000"], max_output_bytes=50_000)
+    assert code == 0
+    assert len(out) < 60_000  # 3 MB printed, ~50 KB kept
+    assert "output truncated at 50000 bytes" in out
+
+
+async def test_run_cmd_small_output_untouched():
+    code, out = await run_cmd(["bash", "-c", "echo hi"])
+    assert code == 0 and out == "hi\n"
